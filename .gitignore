@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+*.pyo
+*.pyd
+*.env
+*.venv
+env/
+venv/
+ENV/
+
+# IDE / 편집기
+.vscode/
+.idea/
+*.swp
+
+# Docker
+*.log
+*.pid
+*.sock
+
+# 데이터 디렉토리
+/data/
+data/
+*.sqlite
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
