@@ -14,7 +14,7 @@ app = FastAPI(title="MCP Client API")
 async def init_client():
     model = AzureChatOpenAI(
         azure_endpoint="https://skcc-atl-master-openai-01.openai.azure.com/",
-        api_key="FpWkoIu3ZsP9VTrYqmxF8wEUzmAAXrqkTh28HxyX0JdyniQzsJRgJQQJ99BEACYeBjFXJ3w3AAABACOGGWOw",
+        api_key="dummy_key",
         azure_deployment="gpt-4o",
         api_version='2024-02-15-preview'
     )
