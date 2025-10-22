@@ -7,7 +7,22 @@ from qdrant_service import QdrantService
 qdrant = QdrantService(url="http://qdrant:6333")
 
 # MCP Server 생성
-mcp_server = FastMCP(name="opa_tools", debug=True)
+mcp_server = FastMCP(name="opa_tools", host="0.0.0.0", port="8001", debug=True)
+
+
+@mcp_server.prompt("agent_prompt")
+def get_agent_prompt() -> str:
+    """
+    Get a prompt for the AI agent
+    """
+    return "You're a helpful AI assistant that specialized in rego code generation."
+
+@mcp_server.tool("get_agent_prompt_tool")
+def get_agent_prompt_tool() -> str:
+    """
+    Get a prompt for the AI agent
+    """
+    return get_agent_prompt()
 
 # -------------------------------
 # 기능별 Tool 등록
@@ -56,4 +71,4 @@ async def handle_opa(data: dict):
 # -------------------------------
 if __name__ == "__main__":
     print("Starting MCP Server on port 8001...")
-    mcp_server.run(transport="sse")
+    mcp_server.run(transport="streamable-http")

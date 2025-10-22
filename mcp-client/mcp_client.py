@@ -1,92 +1,77 @@
 import json, asyncio
-from contextlib import AsyncExitStack
+
 from fastapi import FastAPI, HTTPException
-from mcp.client.stdio import stdio_client
-from mcp import ClientSession, StdioServerParameters
+from langchain_openai import AzureChatOpenAI
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.prebuilt import create_react_agent
 
 # -------------------------------
 # FastAPI 앱 생성
 # -------------------------------
-app = FastAPI(title="MCP Client API (stdio-based)")
+app = FastAPI(title="MCP Client API")
 
-# -------------------------------
-# 서버 연결 및 ClientSession 초기화
-# -------------------------------
-async def get_mcp_session():
-    # MCP 서버 설정 파일
-    with open("mcp_server_config.json") as f:
-        config = json.load(f)["mcpServers"]["filesystem"]
 
-    server_params = StdioServerParameters(
-        command=config["command"],
-        args=config["args"],
-        env=None
+async def init_client():
+    model = AzureChatOpenAI(
+        azure_endpoint="https://skcc-atl-master-openai-01.openai.azure.com/",
+        api_key="FpWkoIu3ZsP9VTrYqmxF8wEUzmAAXrqkTh28HxyX0JdyniQzsJRgJQQJ99BEACYeBjFXJ3w3AAABACOGGWOw",
+        azure_deployment="gpt-4o",
+        api_version='2024-02-15-preview'
     )
 
-    stack = AsyncExitStack()
-    async with stack:
-        stdio, write = await stack.enter_async_context(stdio_client(server_params))
-        session = await stack.enter_async_context(ClientSession(stdio, write))
-        await session.initialize()
-        yield session
+    client = MultiServerMCPClient({
+        "opa_tools": {
+            "url": "http://localhost:8001/mcp/",
+            "transport": "streamable_http"
+        }
+    })
 
-# -------------------------------
-# MCP Tool 호출 함수
-# -------------------------------
-async def fetch_user(emp_id: str):
-    async for session in get_mcp_session():
-        resp = await session.call_tool("user", {"emp_id": emp_id})
-        return resp
+    tools = await client.get_tools()
+    print("Available Tools")
+    print(tools)
 
-async def fetch_qdrant(query_vector: list, collection_name="context", limit=5):
-    async for session in get_mcp_session():
-        resp = await session.call_tool("qdrant", {
-            "query_vector": query_vector,
-            "collection_name": collection_name,
-            "limit": limit
-        })
-        return resp
+    prompt = await client.get_prompt(server_name="opa_tools", prompt_name="agent_prompt")
+    print("Client Prompt")
+    print(prompt[0].content)
 
-async def validate_opa(rego_code: str):
-    async for session in get_mcp_session():
-        resp = await session.call_tool("opa", {"rego_code": rego_code})
-        return resp
+    return create_react_agent(model, tools, prompt=prompt[0].content)
+
+async def test_agent():
+    agent = await init_client()
+
+    user_request = "Test input"
+    inputs = {"messages": user_request}
+    print(inputs)
+    async for chunk_msg, metadata in agent.astream(inputs, stream_mode="messages"):
+        if hasattr(chunk_msg, "content") and isinstance(chunk_msg.content, str):
+            print(chunk_msg.content, end="", flush=True)
+
+        else:
+            print(chunk_msg, end="", flush=True)
+
 
 # -------------------------------
 # FastAPI 엔드포인트
 # -------------------------------
 @app.post("/generate_policy")
 async def generate_policy(request: dict):
-    emp_id = request.get("emp_id")
-    if not emp_id:
-        raise HTTPException(status_code=400, detail="emp_id is missing")
+    user_request = request.get("request")
+    if not user_request:
+        raise HTTPException(status_code=400, detail="Missing 'request' field (natural language request)")
 
-    # 1. 사용자 정보 조회
-    user_resp = await fetch_user(emp_id)
-    user_data = user_resp.get("user_data")
+    # 1️⃣ 자연어 요청 → 구성요소 추출
+    structured_req = dict()
 
-    # 2. Qdrant 검색 (예시 벡터 사용)
-    query_vector = [0.0] * 1536
-    qdrant_resp = await fetch_qdrant(query_vector)
-    context = qdrant_resp.get("context")
+    # 2️⃣ MCP 서버 연결
+    agent = init_client()
 
-    # 3. Rego 코드 생성 및 OPA 검증
-    sample_rego = f"""
-package example.policy
+    inputs = {"messages": user_request}
+    async for chunk_msg, metadata in agent.astream(inputs, stream_mode="messages"):
+        if hasattr(chunk_msg, "content") and isinstance(chunk_msg.content, str):
+            print(chunk_msg.content, end="", flush=True)
 
-default allow = false
+        else:
+            print(chunk_msg, end="", flush=True)
 
-allow {{
-    input.user == "{user_data['emp_id']}"
-}}
-"""
-    opa_resp = await validate_opa(sample_rego)
-    validated_rego = opa_resp.get("validated_rego")
-
-    # 최종 결과 반환
-    return {
-        "status": "success",
-        "user_data": user_data,
-        "context": context,
-        "validated_rego": validated_rego
-    }
+if __name__=="__main__":
+    asyncio.run(test_agent())

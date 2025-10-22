@@ -2,3 +2,6 @@ fastapi
 uvicorn
 httpx
 mcp
+langextract
+langchain
+langchain-mcp-adapters
