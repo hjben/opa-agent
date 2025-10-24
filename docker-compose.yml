@@ -2,7 +2,11 @@ version: "3.9"
 
 services:
   mcp-client:
-    build: ./mcp-client
+    build:
+      context: ./mcp-client
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
     container_name: mcp-client
     ports:
       - "8000:8000"
@@ -12,7 +16,11 @@ services:
       - mcp-network
 
   mcp-server:
-    build: ./mcp-server
+    build:
+      context: .
+      dockerfile: ./mcp-server/Dockerfile
+      platforms:
+        - linux/amd64
     container_name: mcp-server
     command: ["python", "mcp_server.py"]
     ports:
@@ -25,7 +33,11 @@ services:
       - mcp-network
 
   ui:
-    build: ./ui
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
     container_name: ui
     ports:
       - "8501:8501"
@@ -37,6 +49,7 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     container_name: qdrant
+    platform: linux/amd64
     ports:
       - "6333:6333"
     volumes:
@@ -47,6 +60,7 @@ services:
   opa:
     image: openpolicyagent/opa:latest
     container_name: opa
+    platform: linux/amd64
     command: ["run", "--server"]
     ports:
       - "8181:8181"
@@ -56,6 +70,7 @@ services:
   mariadb:
     image: mariadb:latest
     container_name: mariadb
+    platform: linux/amd64
     environment:
       MYSQL_ROOT_PASSWORD: rootpassword
       MYSQL_DATABASE: opa_db
