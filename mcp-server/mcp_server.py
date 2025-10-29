@@ -33,30 +33,8 @@ Generate a valid OPA Rego policy based on the request below.
 
 Rules:
 - Ensure the policy follows valid Rego syntax (with 'opa check' command).
-- Do not include explanations or comments.
-- Show the finally valid Rego syntax only.
-"""
-
-@mcp_server.prompt("rego_regen_prompt")
-def get_rego_regen_prompt() -> str:
-    """
-    Get a code-regenerate prompt.
-    """
-    return """
-The previous OPA policy failed to the syntax test.
-Fix the following issues based on the error log below, and regenerate a corrected rego code.
-
-[User request]
-{user_request}
-
-Error message:
-{last_error_log}
-
-Previous policy code:
-{prev_code}
-
-Rules:
-- Ensure the policy follows valid Rego syntax (with 'opa check' command).
+- If the generated code is not valid, re-generate code.
+- `if` keyword is required before the rule body starts.
 - Do not include explanations or comments.
 - Output must be a JSON only.
 """
