@@ -39,13 +39,31 @@ Rules:
 - Output must be a JSON only.
 """
 
+@mcp_server.prompt("test_rego_gen_prompt")
+def get_test_rego_gen_prompt() -> str:
+    """
+    Get a test rego code-generate prompt.
+    """
+    return """
+Generate a valid rego code to test the code below.
+
+[Rego code]
+{rego_code}
+
+Rules:
+- Ensure the test code follows valid Rego syntax (with 'opa check' command).
+- If the generated code is not valid, re-generate code.
+- `if` keyword is required before the rule body starts.
+- Do not include explanations or comments.
+- Output must be a JSON only.
+"""
+
 @mcp_server.prompt("opa_test_prompt")
 def get_opa_test_prompt() -> str:
     """
     Get a opa test prompt.
     """
     return """
-
 Test the policy with the policy code and test code as input.
 
 Expected Inputs:
@@ -55,7 +73,7 @@ Expected Inputs:
 Output JSON only:
 {
     "validation": True/False,
-    "validation_msg": "test result message>"
+    "validation_msg": "test result message"
 }
 """
 

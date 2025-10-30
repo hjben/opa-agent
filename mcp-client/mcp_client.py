@@ -74,15 +74,15 @@ class MCPClientManager:
         tools = await self.mcp_client.get_tools()
         self.prompts["base"] = (await self.mcp_client.get_prompt("opa_tools", "base_prompt"))[0].content
         self.prompts["rego_gen"] = (await self.mcp_client.get_prompt("opa_tools", "rego_gen_prompt"))[0].content
+        self.prompts["test_rego_gen"] = (await self.mcp_client.get_prompt("opa_tools", "test_rego_gen_prompt"))[0].content
         self.prompts["opa_test"] = (await self.mcp_client.get_prompt("opa_tools", "opa_test_prompt"))[0].content
 
         self.agent = create_react_agent(model, tools, prompt=self.prompts["base"])
         print("✅ MCP Client initialized, prompts loaded")
 
-    async def generate_and_validate(self, user_request: str):
+    async def generate_policy(self, user_request: str):
         """
         Generate OPA Rego policy and test code using LLM, validate via MCP Server.
-        Retries up to `retry_limit` times if test fails.
         """
 
         print(f"Generating policy...")
@@ -105,6 +105,26 @@ class MCPClientManager:
                 "error_message": result["error_message"]
             }
     
+    async def test_policy(self, rego_code: str):
+        """
+        Generate OPA Rego policy and test code using LLM, validate via MCP Server.
+        """
+
+        print(f"Generating Test OPA policy...")
+        prompt_text = self.prompts["test_rego_gen"].format(rego_code=rego_code)
+
+        # LLM 요청
+        policy_json = ""
+        inputs = {"messages": prompt_text}
+        async for chunk_msg, _ in self.agent.astream(inputs, stream_mode="messages"):
+            if hasattr(chunk_msg, "content") and isinstance(chunk_msg.content, str):
+                policy_json += chunk_msg.content
+
+        result = self.extract_rego_or_last_json(policy_json)
+        print("="*50)
+        print(result)
+
+
 # ===============================
 # FastAPI Startup
 # ===============================
@@ -130,7 +150,8 @@ async def generate_policy(request: dict):
     if not user_request:
         raise HTTPException(status_code=400, detail="Missing 'request' field.")
 
-    result = await client_manager.generate_and_validate(user_request, retry_limit)
+    result = await client_manager.generate_policy(user_request, retry_limit)
+
     return result
 
 # ===============================
@@ -139,14 +160,16 @@ async def generate_policy(request: dict):
 if __name__ == "__main__":
     async def local_test():
         await client_manager.initialize()
-        result = await client_manager.generate_and_validate(
+        gen_result = await client_manager.generate_policy(
             "관리자는 언제든 접근 가능하고, 일반 사용자는 근무시간 중 자신의 리소스만 수정할 수 있는 정책을 만들어줘.",
         )
-        print(json.dumps(result, indent=2))
 
-        result = await client_manager.generate_and_validate(
-            "API 접근 제어 정책을 만들어줘. '/users' GET은 관리자와 일반 사용자 모두 가능, '/users' POST는 관리자만 가능하도록 해 줘."
+        rego_code = gen_result["policy"]
+        
+        test_result = await client_manager.test_policy(
+            rego_code
         )
-        print(json.dumps(result, indent=2))
+        
+        print(json.dumps(test_result, indent=2))
 
     asyncio.run(local_test())
