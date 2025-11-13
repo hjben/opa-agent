@@ -1,18 +1,21 @@
 from mcp.server.fastmcp import FastMCP
-# from service.mariadb import get_user_by_id, get_all_users
-from service.qdrant import QdrantService
+from service.mariadb import get_user_by_id, get_all_users
+# from service.qdrant import QdrantService
 
 import os
 import tempfile
 import subprocess
 
 # Qdrant 연결
-qdrant = QdrantService(url="http://qdrant:6333")
+# qdrant = QdrantService(url="http://qdrant:6333")
 
 # MCP Server 생성
 mcp_server = FastMCP(name="opa_tools", host="0.0.0.0", port="8001", debug=True)
 
 
+# -------------------------------
+# Prompts
+# -------------------------------
 @mcp_server.prompt("base_prompt")
 def get_agent_prompt() -> str:
     """
@@ -37,6 +40,21 @@ Rules:
 - `if` keyword is required before the rule body starts.
 - Do not include explanations or comments.
 - Output must be a JSON only.
+
+[Example]
+```
+package authz
+
+allow if {{
+	input.path == ["users"]
+	input.method == "POST"
+}}
+
+allow if {{
+	input.path == ["users", input.user_id]
+	input.method == "GET"
+}}
+```
 """
 
 @mcp_server.prompt("test_rego_gen_prompt")
@@ -54,8 +72,30 @@ Rules:
 - Ensure the test code follows valid Rego syntax (with 'opa check' command).
 - If the generated code is not valid, re-generate code.
 - `if` keyword is required before the rule body starts.
+- Don't use '_' variable in test code because it's unsafe.
 - Do not include explanations or comments.
 - Output must be a JSON only.
+
+[Example]
+package authz_test
+
+import data.authz
+
+test_post_allowed if {{
+	authz.allow with input as {{"path": ["users"], "method": "POST"}}
+}}
+
+test_get_anonymous_denied if {{
+	not authz.allow with input as {{"path": ["users"], "method": "GET"}}
+}}
+
+test_get_user_allowed if {{
+	authz.allow with input as {{"path": ["users", "bob"], "method": "GET", "user_id": "bob"}}
+}}
+
+test_get_another_user_denied if {{
+	not authz.allow with input as {{"path": ["users", "bob"], "method": "GET", "user_id": "alice"}}
+}}
 """
 
 @mcp_server.prompt("opa_test_prompt")
@@ -64,28 +104,62 @@ def get_opa_test_prompt() -> str:
     Get a opa test prompt.
     """
     return """
-Test the policy with the policy code and test code as input.
+Test the policy with the policy code and test code as input, using 'opa_test' tool.
+Policy code is the main rego code to be tested, and test code is to test the policy.
+[Policy code]
+{policy_code}
 
-Expected Inputs:
-    "policy_code": str,   # The main Rego policy code to be tested
-    "test_code": str    # The test file written in Rego to validate the policy
+[Test code]
+{test_code}
 
-Output JSON only:
-{
+Output must be consisted of JSON only, with two keys below:
     "validation": True/False,
     "validation_msg": "test result message"
-}
 """
 
-# -------------------------------
-# Tool: User 정보 추출
-# -------------------------------
-# @mcp_server.tool("user")
-# async def get_user_tool(data: dict):
-#     emp_id = data.get("emp_id")
-#     if emp_id:
-#         return {"user": get_user_by_id(emp_id)}
-#     return {"users": get_all_users()}
+
+@mcp_server.prompt("opa_summary_prompt")
+def get_opa_summary_prompt() -> str:
+    """
+    Summarize the OPA policy generation and validation results.
+    """
+    return """
+Summarize the OPA policy generation and validation results clearly and concisely.
+
+[Policy code]
+{policy_code}
+
+[Test code]
+{test_code}
+
+[Test result]
+{validation_result}
+
+Context:
+- The user requested a specific API access control policy.
+- You generated Rego policy code and a corresponding test file.
+- The policy syntax was checked and validated using OPA tools.
+- The test results indicate whether the policy logic works as intended.
+
+Output Format:
+Provide a short summary including:
+1. A one-line description of the policy goal.
+2. Whether the syntax check passed or failed.
+3. Whether the OPA tests passed or failed.
+4. A brief explanation of any detected issue or final validation success.
+5. Full-text of the Policy code and test code, and the test result.
+
+Rules:
+- The request is made of Korean, your output must be in Korean.
+- Present the summary, policy code, test code, and test results in a visually clean and natural format.
+- Keep indentation, spacing, and newlines for readability.
+- Output plain text only (no JSON).
+- Keep the tone concise and professional.
+
+Example output:
+"The generated policy controls user access based on roles and time. Syntax and tests passed successfully."
+"""
+
 
 # -------------------------------
 # Tool: Rego 코드 테스트
@@ -202,26 +276,26 @@ async def opa_test(policy_code, test_code):
     policy_path = "/tmp/policy.rego"
     test_path = "/tmp/policy_test.rego"
 
-    # 정책 코드 저장
+    # 정책 파일 생성
     with open(policy_path, "w", encoding="utf-8") as f:
         f.write(policy_code)
 
-    # 테스트 파일 생성 (없으면 생성)
+    # 테스트 파일 생성
     with open(test_path, "w", encoding="utf-8") as f:
         f.write(test_code)
 
     try:
         # opa test 실행
         result = subprocess.run(
-            ["opa", "test", policy_path, test_path],
+            ["opa", "test", "-v", policy_path, test_path],
             capture_output=True,
             text=True
         )
 
         if result.returncode == 0:
-            return {"status": "success", "detail": result.stdout.strip() or "OPA test passed successfully."}
+            return {"status": "success", "detail": result.stdout.strip()}
         else:
-            return {"status": "fail", "detail": result.stderr.strip() or "OPA test failed."}
+            return {"status": "fail", "detail": result.stderr.strip()}
 
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -233,6 +307,40 @@ async def opa_test(policy_code, test_code):
 
         if os.path.exists(test_path):
             os.remove(test_path)
+
+
+# -------------------------------
+# Tool: User 정보 추출
+# -------------------------------
+@mcp_server.tool("user")
+async def get_user_tool(data: dict):
+    """
+    Tool Name: user
+    --------------------
+    Description:
+        Retrieves information for a single user based on the provided employee ID (emp_id),
+        or returns all users if emp_id is not provided.
+    
+        This tool is useful for fetching user details from the database in a standardized format.
+    
+    Args:
+        data: dict
+            - emp_id: str, optional
+                Employee ID of the user to retrieve. If not provided, all users are returned.
+    
+    Returns (JSON):
+        {
+            "user": dict
+                - Contains user information when emp_id is provided.
+            "users": list[dict]
+                - List of all users when emp_id is not provided.
+        }
+    """
+    emp_id = data.get("emp_id")
+    if emp_id:
+        return {"user": get_user_by_id(emp_id)}
+    return {"users": get_all_users()}
+
 
 # -------------------------------
 # 서버 시작

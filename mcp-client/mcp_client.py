@@ -1,6 +1,8 @@
-import re
+import ast
 import json
 import asyncio
+
+from typing import Optional, Dict
 from fastapi import FastAPI, HTTPException
 from langchain_openai import AzureChatOpenAI
 from langgraph.prebuilt import create_react_agent
@@ -23,37 +25,103 @@ class MCPClientManager:
         self.prompts = {}
         self.mcp_client = None
 
+        self.prompts_list = ["base", "rego_gen", "test_rego_gen", "opa_test", "opa_summary"]
+
     @staticmethod
-    def extract_rego_or_last_json(text: str):
-        # "rego_code"로 시작해서 마지막 "}"까지 매칭하는 정규식
-        # 중간의 중괄호나 개행, 따옴표 등은 모두 허용
-        pattern = r'\{\s*"rego_code".*?"error_message"\s*:\s*".*?"\s*\}'
-        
-        matches = re.findall(pattern, text, flags=re.DOTALL)
-        
-        if not matches:
+    def extract_result(text: str) -> Optional[Dict]:
+        """
+        Scan `text`, find top-level {...} JSON blocks robustly (ignoring braces inside strings),
+        parse them and return the last successfully parsed JSON-like object (as dict).
+        If none parse, return None.
+        """
+        blocks = []
+        brace_level = 0
+        start_idx = None
+        in_string = False
+        string_char = None   # either '"' or "'"
+        escape = False
+
+        for i, ch in enumerate(text):
+            # Handle string toggling and escapes
+            if ch == '"' or ch == "'":
+                if not escape:
+                    if not in_string:
+                        in_string = True
+                        string_char = ch
+                    elif string_char == ch:
+                        in_string = False
+                        string_char = None
+                # else: quote escaped -> ignore
+                escape = False
+                # If inside string, chars don't affect brace_level
+                if brace_level > 0:
+                    continue
+                else:
+                    continue
+            elif ch == "\\":
+                # toggle escape for next char
+                escape = not escape
+                # continue loop (do not reset escape here, next iteration handles)
+                continue
+            else:
+                # reset escape if previous char was backslash (and current not another backslash)
+                escape = False
+
+            # If not inside string, track braces
+            if not in_string:
+                if ch == "{":
+                    if brace_level == 0:
+                        start_idx = i
+                    brace_level += 1
+                elif ch == "}":
+                    if brace_level > 0:
+                        brace_level -= 1
+                        if brace_level == 0 and start_idx is not None:
+                            block = text[start_idx:i+1]
+                            blocks.append(block)
+                            start_idx = None
+                    # else: unmatched closing brace — ignore
+            # else: inside string, ignore braces
+
+        if not blocks:
+            print(text)
             return None
 
-        last_json_str = matches[-1]
+        # Try to parse blocks from last to first (so we can return the last valid)
+        for raw in reversed(blocks):
+            s = raw.strip()
+            # quick cleanup: sometimes LLM injects weird backticks around blocks; remove leading/trailing backticks
+            if s.startswith("```") and s.endswith("```"):
+                # remove fencing, keep inner
+                inner = s.strip("`")
+                s = inner.strip()
 
-        try:
-            # JSON 문자열의 내부에 이스케이프된 따옴표나 개행이 있을 수 있으므로
-            # 불필요한 문자들을 안전하게 정리
-            parsed_json = json.loads(last_json_str)
-        except json.JSONDecodeError as e:
-            print(f"[JSON 파싱 오류] {e}")
-            return None
+            # Attempt JSON parsing
+            try:
+                parsed = json.loads(s)
+                return parsed
+            except json.JSONDecodeError:
+                # Try python literal eval (accepts single quotes etc.)
+                try:
+                    parsed = ast.literal_eval(s)
+                    # ensure it's a dict-like result
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    pass
 
-        # 필드 추출 (없을 경우 None)
-        rego_code = parsed_json.get("rego_code")
-        is_valid = parsed_json.get("is_valid")
-        error_message = parsed_json.get("error_message")
+                # Last resort: try heuristic fixes (replace single quotes -> double quotes, True/False -> true/false)
+                try:
+                    heur = s.replace("'", '"').replace("True", "true").replace("False", "false").replace("None", "null")
+                    parsed = json.loads(heur)
+                    return parsed
+                except Exception:
+                    # parsing failed for this block, continue to previous block
+                    continue
 
-        return {
-            "rego_code": rego_code,
-            "is_valid": is_valid,
-            "error_message": error_message
-        }
+        # No block parsed successfully
+        print(text)
+        return None
         
     async def initialize(self):
         """Initialize MCP client, load tools, prompts, and LLM agent."""
@@ -72,58 +140,66 @@ class MCPClientManager:
         })
 
         tools = await self.mcp_client.get_tools()
-        self.prompts["base"] = (await self.mcp_client.get_prompt("opa_tools", "base_prompt"))[0].content
-        self.prompts["rego_gen"] = (await self.mcp_client.get_prompt("opa_tools", "rego_gen_prompt"))[0].content
-        self.prompts["test_rego_gen"] = (await self.mcp_client.get_prompt("opa_tools", "test_rego_gen_prompt"))[0].content
-        self.prompts["opa_test"] = (await self.mcp_client.get_prompt("opa_tools", "opa_test_prompt"))[0].content
+
+        for prompt in self.prompts_list:
+            self.prompts[prompt] = (await self.mcp_client.get_prompt("opa_tools", f"{prompt}_prompt"))[0].content
 
         self.agent = create_react_agent(model, tools, prompt=self.prompts["base"])
         print("✅ MCP Client initialized, prompts loaded")
+
+    async def llm_call(self, prompt: str):
+        result = ""
+        async for chunk_msg, _ in self.agent.astream({"messages": prompt}, stream_mode="messages"):
+            if hasattr(chunk_msg, "content") and isinstance(chunk_msg.content, str):
+                result += chunk_msg.content
+
+        return result
 
     async def generate_policy(self, user_request: str):
         """
         Generate OPA Rego policy and test code using LLM, validate via MCP Server.
         """
-
-        print(f"Generating policy...")
-        prompt_text = self.prompts["rego_gen"].format(user_request=user_request)
-
-        # LLM 요청
-        policy_json = ""
-        inputs = {"messages": prompt_text}
-        async for chunk_msg, _ in self.agent.astream(inputs, stream_mode="messages"):
-            if hasattr(chunk_msg, "content") and isinstance(chunk_msg.content, str):
-                policy_json += chunk_msg.content
-
-        print(policy_json)
-        result = self.extract_rego_or_last_json(policy_json)
-        print("="*50)
+        llm_text = await self.llm_call(self.prompts["rego_gen"].format(user_request=user_request))
+        result_json = self.extract_result(llm_text)
 
         return {
-                "success": result["is_valid"],
-                "policy": result["rego_code"],
-                "error_message": result["error_message"]
+            "policy": result_json.get("rego_code"),
+            "is_valid": result_json.get("is_valid"),
+            "error_message": result_json.get("error_message")
             }
     
-    async def test_policy(self, rego_code: str):
+    async def generate_test_policy(self, rego_code: str):
         """
         Generate OPA Rego policy and test code using LLM, validate via MCP Server.
         """
+        llm_text = await self.llm_call(self.prompts["test_rego_gen"].format(rego_code=rego_code))
+        result_json = self.extract_result(llm_text)
 
-        print(f"Generating Test OPA policy...")
-        prompt_text = self.prompts["test_rego_gen"].format(rego_code=rego_code)
+        return {
+            "policy": result_json.get("rego_code"),
+            "is_valid": result_json.get("is_valid"),
+            "error_message": result_json.get("error_message")
+            }
+    
+    async def opa_test(self, policy_code: str, test_code: str):
+        """
+        Test OPA Rego policy with given policy code and test code.
+        """
+        llm_text = await self.llm_call(self.prompts["opa_test"].format(policy_code=policy_code, test_code=test_code))
+        result_json = self.extract_result(llm_text)
+        
+        return {
+            "validation": result_json.get("validation"),
+            "validation_msg": result_json.get("validation_msg")
+            }
+    
+    async def opa_summary(self, policy_code, test_code, validation_msg):
+        """
+        Generate final output to End User.
+        """
+        llm_text = await self.llm_call(self.prompts["opa_summary"].format(policy_code=policy_code, test_code=test_code, validation_result=validation_msg))
 
-        # LLM 요청
-        policy_json = ""
-        inputs = {"messages": prompt_text}
-        async for chunk_msg, _ in self.agent.astream(inputs, stream_mode="messages"):
-            if hasattr(chunk_msg, "content") and isinstance(chunk_msg.content, str):
-                policy_json += chunk_msg.content
-
-        result = self.extract_rego_or_last_json(policy_json)
-        print("="*50)
-        print(result)
-
+        return llm_text
 
 # ===============================
 # FastAPI Startup
@@ -144,15 +220,89 @@ async def startup_event():
 # ===============================
 @app.post("/generate_policy")
 async def generate_policy(request: dict):
-    user_request = request.get("request")
-    retry_limit = int(request.get("retry_limit", 3))
+    """
+    Generate OPA policy, test policy, run OPA test, and produce summary output.
+    """
+    user_query = request.get("query")
 
-    if not user_request:
+    if not user_query:
         raise HTTPException(status_code=400, detail="Missing 'request' field.")
 
-    result = await client_manager.generate_policy(user_request, retry_limit)
+    # 1️⃣ OPA Policy 생성
+    print(f"Generating policy...")
+    gen_result = await client_manager.generate_policy(user_query)
+    print(gen_result)
 
-    return result
+    rego_code = gen_result["policy"]
+
+    # 2️⃣ OPA Test Policy 생성
+    print(f"Generating test policy...")
+    test_gen_result = await client_manager.generate_test_policy(rego_code)
+    test_code = test_gen_result["policy"]
+
+    # 3️⃣ OPA Test 실행
+    test_result = await client_manager.opa_test(rego_code, test_code)
+
+    # 4️⃣ LLM 호출로 요약 결과 생성
+    final_result = await client_manager.llm_call(
+        client_manager.prompts["opa_summary"].format(
+            policy_code=rego_code,
+            test_code=test_code,
+            validation_result=test_result.get("validation_msg", "")
+        )
+    )
+
+    # 5️⃣ 최종 응답
+    return {
+        "status": "success",
+        "policy": rego_code,
+        "test_policy": test_code,
+        "opa_test_result": test_result,
+        "summary": final_result
+    }
+
+@app.post()
+async def generate_policy(request: dict):
+    """
+    Generate OPA policy, test policy, run OPA test, and produce summary output.
+    """
+    user_query = request.get("query")
+
+    if not user_query:
+        raise HTTPException(status_code=400, detail="Missing 'request' field.")
+
+    # 1️⃣ OPA Policy 생성
+    print(f"Generating policy...")
+    gen_result = await client_manager.generate_policy(user_query)
+    print(gen_result)
+
+    rego_code = gen_result["policy"]
+
+    # 2️⃣ OPA Test Policy 생성
+    print(f"Generating test policy...")
+    test_gen_result = await client_manager.generate_test_policy(rego_code)
+    test_code = test_gen_result["policy"]
+
+    # 3️⃣ OPA Test 실행
+    test_result = await client_manager.opa_test(rego_code, test_code)
+
+    # 4️⃣ LLM 호출로 요약 결과 생성
+    final_result = await client_manager.llm_call(
+        client_manager.prompts["opa_summary"].format(
+            policy_code=rego_code,
+            test_code=test_code,
+            validation_result=test_result.get("validation_msg", "")
+        )
+    )
+
+    # 5️⃣ 최종 응답
+    return {
+        "status": "success",
+        "policy": rego_code,
+        "test_policy": test_code,
+        "opa_test_result": test_result,
+        "summary": final_result
+    }
 
 # ===============================
 # Local Test
@@ -163,13 +313,22 @@ if __name__ == "__main__":
         gen_result = await client_manager.generate_policy(
             "관리자는 언제든 접근 가능하고, 일반 사용자는 근무시간 중 자신의 리소스만 수정할 수 있는 정책을 만들어줘.",
         )
-
+        print(f"Generating policy...")
         rego_code = gen_result["policy"]
-        
-        test_result = await client_manager.test_policy(
-            rego_code
-        )
-        
+        print(rego_code)
+
+        print(f"Generating Test OPA policy...")
+        test_gen_result = await client_manager.generate_test_policy(rego_code)
+        test_code = test_gen_result["policy"]
+        print(test_code)
+
+        print(f"Testing OPA policy...")
+        test_result = await client_manager.opa_test(rego_code, test_code)
         print(json.dumps(test_result, indent=2))
+
+        print(f"Generating outputs...")
+        final_result = await client_manager.llm_call(client_manager.prompts["opa_summary"].format(policy_code=rego_code, test_code=test_code, validation_result=test_result["validation_msg"]))
+
+        print(final_result)
 
     asyncio.run(local_test())

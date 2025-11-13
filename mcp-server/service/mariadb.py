@@ -1,35 +1,4 @@
-from contextlib import contextmanager
-from mysql.connector import pooling
-import os
-
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": int(os.getenv("DB_PORT", 3306)),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", "rootpassword"),
-    "database": os.getenv("DB_NAME", "opa_db"),
-}
-
-# Connection Pool
-connection_pool = pooling.MySQLConnectionPool(
-    pool_name="mcp_pool",
-    pool_size=5,
-    **DB_CONFIG
-)
-
-@contextmanager
-def db_cursor(dictionary=False):
-    """자동으로 연결 및 커서 닫기를 처리하는 헬퍼"""
-    conn = connection_pool.get_connection()
-    try:
-        with conn.cursor(dictionary=dictionary) as cursor:
-            yield cursor
-            conn.commit()
-    except Exception as e:
-        conn.rollback()
-        raise e
-    finally:
-        conn.close()
+from mariadb.db_connection import db_cursor
 
 # ===================================
 # USER TABLE CRUD

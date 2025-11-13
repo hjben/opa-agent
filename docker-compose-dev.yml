@@ -1,51 +1,6 @@
 version: "3.9"
 
 services:
-  mcp-client:
-    build:
-      context: ./mcp-client
-      dockerfile: Dockerfile
-      platforms:
-        - linux/amd64
-    container_name: mcp-client
-    ports:
-      - "8000:8000"
-    depends_on:
-      - mcp-server
-    networks:
-      - mcp-network
-
-  mcp-server:
-    build:
-      context: .
-      dockerfile: ./mcp-server/Dockerfile
-      platforms:
-        - linux/amd64
-    container_name: mcp-server
-    command: ["python", "mcp_server.py"]
-    ports:
-      - "8001:8001"
-    depends_on:
-      - mariadb
-      - opa
-      - qdrant
-    networks:
-      - mcp-network
-
-  ui:
-    build:
-      context: ./ui
-      dockerfile: Dockerfile
-      platforms:
-        - linux/amd64
-    container_name: ui
-    ports:
-      - "8501:8501"
-    depends_on:
-      - mcp-client
-    networks:
-      - mcp-network
-
   qdrant:
     image: qdrant/qdrant:latest
     container_name: qdrant
@@ -58,10 +13,12 @@ services:
       - mcp-network
 
   opa:
-    image: openpolicyagent/opa:latest
+    image: openpolicyagent/opa:latest-debug
     container_name: opa
     platform: linux/amd64
-    command: ["run", "--server"]
+    command: ["run", "--server", "/app/policy"]
+    volumes:
+      - ./opa/policy:/app/policy
     ports:
       - "8181:8181"
     networks:
@@ -81,7 +38,6 @@ services:
       - ./mariadb/init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - mcp-network
-
   dummy-api:
     build:
       context: .
