@@ -1,7 +1,9 @@
 from mcp.server.fastmcp import FastMCP
 from service.mariadb import get_user_by_id, get_all_users
+from service.opa import get_all_policies
 # from service.qdrant import QdrantService
 
+import json
 import os
 import tempfile
 import subprocess
@@ -35,11 +37,12 @@ Generate a valid OPA Rego policy based on the request below.
 {user_request}
 
 Rules:
-- Ensure the policy follows valid Rego syntax (with 'opa check' command).
-- If the generated code is not valid, re-generate code.
+- When generating a policy, refer the current policies. You can get current policies with 'list_policies' tool.
+- Ensure the policy follows valid Rego syntax (with 'opa check' tool).
+- If the generated code is not valid, re-generate code until the code is good enough.
 - `if` keyword is required before the rule body starts.
 - Do not include explanations or comments.
-- Output must be a JSON only.
+- Output must be a JSON with three keys only: rego_code, is_valid, error_message.
 
 [Example]
 ```
@@ -69,12 +72,12 @@ Generate a valid rego code to test the code below.
 {rego_code}
 
 Rules:
-- Ensure the test code follows valid Rego syntax (with 'opa check' command).
-- If the generated code is not valid, re-generate code.
+- Ensure the test code follows valid Rego syntax (with 'opa check' tool).
+- If the generated code is not valid, re-generate code until the code is good enough.
 - `if` keyword is required before the rule body starts.
 - Don't use '_' variable in test code because it's unsafe.
 - Do not include explanations or comments.
-- Output must be a JSON only.
+- Output must be a JSON with three keys only: rego_code, is_valid, error_message.
 
 [Example]
 package authz_test
@@ -114,7 +117,7 @@ Policy code is the main rego code to be tested, and test code is to test the pol
 
 Output must be consisted of JSON only, with two keys below:
     "validation": True/False,
-    "validation_msg": "test result message"
+    "validation_msg": The result of the test. All the test details must be shown
 """
 
 
@@ -153,7 +156,7 @@ Rules:
 - The request is made of Korean, your output must be in Korean.
 - Present the summary, policy code, test code, and test results in a visually clean and natural format.
 - Keep indentation, spacing, and newlines for readability.
-- Output plain text only (no JSON).
+- Output plain text only (no JSON). Never insert the JSON.
 - Keep the tone concise and professional.
 
 Example output:
@@ -295,7 +298,7 @@ async def opa_test(policy_code, test_code):
         if result.returncode == 0:
             return {"status": "success", "detail": result.stdout.strip()}
         else:
-            return {"status": "fail", "detail": result.stderr.strip()}
+            return {"status": "fail", "detail": result.stdout.strip()}
 
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -340,6 +343,57 @@ async def get_user_tool(data: dict):
     if emp_id:
         return {"user": get_user_by_id(emp_id)}
     return {"users": get_all_users()}
+
+@mcp_server.tool("list_policies")
+def list_policies_tool():
+    """
+    Tool Name: list_policies
+    --------------------
+    Description:
+        Fetches all policies currently registered in the connected OPA server and
+        returns their complete definitions (or error details if retrieval fails).
+
+        The tool queries the OPA HTTP API to obtain the list of policy IDs and then
+        requests each policy's content. The returned payload is suitable for display
+        or further processing by an agent (for example, to review, edit, or test policies).
+
+        This tool does not modify any policy on the OPA server; it performs read-only
+        operations. Network or OPA-side errors are surfaced in the returned JSON.
+
+    Args:
+        data: dict (optional)
+            - None required for the current implementation.
+            - If provided, the dict may include optional keys for future extensions
+            (e.g., "filter", "policy_id" or "include_metadata"). Current tool
+            version ignores any input and always returns the full policy list.
+
+    Returns (JSON):
+        {
+            "policies": dict
+                - Mapping from policy_id (str) to policy details (dict).
+                - Each policy details dict typically contains the raw policy text and
+                any extra metadata returned by OPA (or an error object if retrieval failed).
+
+            "error": str (optional)
+                - Present only if a top-level failure occurred while contacting OPA.
+
+        Example:
+        {
+            "policies": {
+                "example_policy": {
+                    "id": "example_policy",
+                    "raw": "package policy\n\ndefault allow := false\n...",
+                    "metadata": { ... }    # optional, depends on OPA response
+                },
+                "another_policy": {
+                    "error": "Failed to retrieve policy: 404 Not Found"
+                }
+            }
+        }
+    """
+    policies = get_all_policies()
+
+    return json.dumps(policies, indent=2, ensure_ascii=False)
 
 
 # -------------------------------

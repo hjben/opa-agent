@@ -2,6 +2,9 @@
 
 import os
 import subprocess
+import requests
+
+OPA_URL = "http://localhost:8181/v1/policies"
 
 def opa_syntax_check(rego_code: str):
     """
@@ -61,7 +64,7 @@ def opa_test(rego_code: str, test_code: str):
     try:
         # opa test 실행
         result = subprocess.run(
-            ["opa", "test", policy_path, test_path],
+            ["opa", "test", "-v", policy_path, test_path],
             capture_output=True,
             text=True
         )
@@ -81,3 +84,26 @@ def opa_test(rego_code: str, test_code: str):
 
         if os.path.exists(test_path):
             os.remove(test_path)
+
+
+def get_all_policies() -> dict:
+    """Fetch all policies from OPA"""
+    resp = requests.get(OPA_URL, timeout=5)
+
+    if resp.status_code != 200:
+        return {
+            "error": f"OPA responded with {resp.status_code}",
+            "detail": resp.text
+        }
+
+    data = resp.json()
+
+    # policies 필드가 없는 경우 방어 처리
+    policies = data.get("result", data)
+
+    # 정책 상세를 모두 가져오기
+    full_policies = {}
+    for policy in policies:
+        full_policies[policy['id']] = policy['raw']
+
+    return full_policies

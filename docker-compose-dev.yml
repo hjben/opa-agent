@@ -16,9 +16,9 @@ services:
     image: openpolicyagent/opa:latest-debug
     container_name: opa
     platform: linux/amd64
-    command: ["run", "--server", "/app/policy"]
+    command: ["run", "--server", "--log-level", "debug", "--bundle", "/app/opa/bundle.tar.gz", "--addr", "0.0.0.0:8181"]
     volumes:
-      - ./opa/policy:/app/policy
+      - ./opa:/app/opa
     ports:
       - "8181:8181"
     networks:

@@ -186,7 +186,9 @@ class MCPClientManager:
         Test OPA Rego policy with given policy code and test code.
         """
         llm_text = await self.llm_call(self.prompts["opa_test"].format(policy_code=policy_code, test_code=test_code))
+        print(llm_text)
         result_json = self.extract_result(llm_text)
+        
         
         return {
             "validation": result_json.get("validation"),
@@ -231,7 +233,6 @@ async def generate_policy(request: dict):
     # 1️⃣ OPA Policy 생성
     print(f"Generating policy...")
     gen_result = await client_manager.generate_policy(user_query)
-    print(gen_result)
 
     rego_code = gen_result["policy"]
 
@@ -241,6 +242,7 @@ async def generate_policy(request: dict):
     test_code = test_gen_result["policy"]
 
     # 3️⃣ OPA Test 실행
+    print(f"Testing policy...")
     test_result = await client_manager.opa_test(rego_code, test_code)
 
     # 4️⃣ LLM 호출로 요약 결과 생성
@@ -261,48 +263,6 @@ async def generate_policy(request: dict):
         "summary": final_result
     }
 
-@app.post()
-async def generate_policy(request: dict):
-    """
-    Generate OPA policy, test policy, run OPA test, and produce summary output.
-    """
-    user_query = request.get("query")
-
-    if not user_query:
-        raise HTTPException(status_code=400, detail="Missing 'request' field.")
-
-    # 1️⃣ OPA Policy 생성
-    print(f"Generating policy...")
-    gen_result = await client_manager.generate_policy(user_query)
-    print(gen_result)
-
-    rego_code = gen_result["policy"]
-
-    # 2️⃣ OPA Test Policy 생성
-    print(f"Generating test policy...")
-    test_gen_result = await client_manager.generate_test_policy(rego_code)
-    test_code = test_gen_result["policy"]
-
-    # 3️⃣ OPA Test 실행
-    test_result = await client_manager.opa_test(rego_code, test_code)
-
-    # 4️⃣ LLM 호출로 요약 결과 생성
-    final_result = await client_manager.llm_call(
-        client_manager.prompts["opa_summary"].format(
-            policy_code=rego_code,
-            test_code=test_code,
-            validation_result=test_result.get("validation_msg", "")
-        )
-    )
-
-    # 5️⃣ 최종 응답
-    return {
-        "status": "success",
-        "policy": rego_code,
-        "test_policy": test_code,
-        "opa_test_result": test_result,
-        "summary": final_result
-    }
 
 # ===============================
 # Local Test
