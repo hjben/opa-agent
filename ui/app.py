@@ -20,11 +20,11 @@ if st.button("Fetch User Policy via MCP"):
             if response.status_code == 200:
                 st.success("Policy fetched successfully!")
 
-                summary = response.json().get("summary", "No summary returned from server.")
+                summary = response.json().get("content", "No content returned from server.")
 
                 # ✅ 화면에 summary만 표시
-                st.subheader("Policy Summary")
-                st.write(summary)
+                st.subheader("Results")
+                st.markdown(summary)
             else:
                 st.error(f"Error: {response.status_code} - {response.text}")
         except Exception as e:

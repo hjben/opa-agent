@@ -87,143 +87,137 @@ Your responses must be precise, structured, and helpful.
 
 
 @mcp_server.prompt("rego_gen_prompt")
-def get_rego_gen_prompt() -> str:
+def get_total_rego_gen_prompt() -> str:
     """
-    Get a rego code-generate prompt.
+    Summarize the OPA policy generation and validation results.
     """
     return """
-Generate a valid OPA Rego policy based on the request below.
+You will perform a full OPA policy generation and validation workflow in a single sequence.
+Follow every step carefully and use the available tools when needed.
 
-[User request]
-{user_request}
+============================================================
+[User Request]
+{user_query}
+============================================================
 
-Rules:
-- When generating a policy, refer the current policies. You can get all the current policies with 'list_policies' tool.
-- Ensure the policy follows valid Rego syntax (with 'opa check' tool).
-- If the generated code is not valid, re-generate code until the code is good enough.
-- `if` keyword is required before the rule body starts.
-- Do not include explanations or comments.
-- Output must be a JSON with three keys only: rego_code, is_valid, error_message.
+Your tasks:
 
-[Example]
-```
+------------------------------------------------------------
+1. Generate Rego Policy Code
+------------------------------------------------------------
+- Generate a valid OPA Rego policy that satisfies the user request.
+- Refer to the current OPA policies using the `list_policies` tool.
+- Ensure strict Rego syntax correctness.
+- The generated policy must:
+  - include the `if` keyword before rule bodies
+  - contain NO explanations, comments, or extraneous text
+- Validate the generated policy using the `opa_check` tool.
+- If validation fails, regenerate the code until it becomes valid.
+- Store the final code internally as <policy_code>.
+
+Example format:
 package authz
 
 allow if {{
-	input.path == ["users"]
-	input.method == "POST"
+    input.path == ["users"]
+    input.method == "POST"
 }}
 
 allow if {{
-	input.path == ["users", input.user_id]
-	input.method == "GET"
+    input.path == ["users", input.user_id]
+    input.method == "GET"
 }}
-```
-"""
 
-@mcp_server.prompt("test_rego_gen_prompt")
-def get_test_rego_gen_prompt() -> str:
-    """
-    Get a test rego code-generate prompt.
-    """
-    return """
-Generate a valid rego code to test the code below.
+------------------------------------------------------------
+2. Generate Test Rego Code
+------------------------------------------------------------
+- Write a full test suite to validate <policy_code>.
+- Follow OPA test syntax rules.
+- Requirements:
+  - MUST include `import data.<package>` for the policy
+  - MUST use `if` before test rule bodies
+  - MUST avoid '_' variables entirely
+  - MUST contain no explanations or comments
+- Validate the test code using the `opa_check` tool.
+- If validation fails, regenerate until valid.
+- Store the final test code internally as <test_code>.
 
-[Rego code]
-{rego_code}
-
-Rules:
-- Ensure the test code follows valid Rego syntax (with 'opa check' tool).
-- If the generated code is not valid, re-generate code until the code is good enough.
-- `if` keyword is required before the rule body starts.
-- Don't use '_' variable in test code because it's unsafe.
-- Do not include explanations or comments.
-- Output must be a JSON with three keys only: rego_code, is_valid, error_message.
-
-[Example]
+Example format:
 package authz_test
 
 import data.authz
 
 test_post_allowed if {{
-	authz.allow with input as {{"path": ["users"], "method": "POST"}}
+    authz.allow with input as {{"path": ["users"], "method": "POST"}}
 }}
 
-test_get_anonymous_denied if {{
-	not authz.allow with input as {{"path": ["users"], "method": "GET"}}
+test_get_denied if {{
+    not authz.allow with input as {{"path": ["users"], "method": "GET"}}
 }}
 
-test_get_user_allowed if {{
-	authz.allow with input as {{"path": ["users", "bob"], "method": "GET", "user_id": "bob"}}
-}}
+------------------------------------------------------------
+3. Run OPA Tests
+------------------------------------------------------------
+- Use the `opa_test` tool with:
+    - policy_code = <policy_code>
+    - test_code  = <test_code>
+- Collect the full test result including:
+    - pass/fail status
+    - detailed execution logs
+- Store this internally as <validation_result>.
+- If some fail case exists, go to the step 1 and re-generate the policy code.
 
-test_get_another_user_denied if {{
-	not authz.allow with input as {{"path": ["users", "bob"], "method": "GET", "user_id": "alice"}}
-}}
+------------------------------------------------------------
+4. Summarize Everything (Markdown) (strictly required)
+------------------------------------------------------------
+Provide a clean, concise summary of the OPA policy generation and validation results using Markdown formatting.
+
+Requirements:
+1. Add a `## Summary` section with:
+   - One-line description of the policy goal.
+   - Whether policy syntax validation passed or failed.
+   - Whether test syntax validation passed or failed.
+   - Whether OPA tests passed or failed.
+2. Add a `## Policy Code` section in a fenced code block with language `rego`, containing the full policy code.
+3. Add a `## Test Code` section in a fenced code block with language `rego`, containing the full test code.
+4. Add a `## Test Results` section in a normal plain text with ``` block, and don't use any markdown tags. Just show the `opa test` validation result.
+5. Ensure all sections are clearly separated using `---`.
+6. Keep indentation, spacing, and newlines for readability.
+7. Output plain Markdown only; do not include additional JSON or explanatory text outside the Markdown structure.
+8. Tone should be professional, concise, and suitable for technical documentation.
+
+Example structure:
+
+## Policy Code
+# Policy Summary
+
+## Summary
+This policy controls resource access based on user roles and request methods.  
+Policy syntax validation passed successfully, the test code syntax also passed,  
+and all OPA tests have passed successfully.
+
+## POLICY CODE
+<policy code here>
+
+## TEST CODE
+<test code here>
+
+## TEST RESULTS
+<test results here>
+
+
+[Output Rules]
+- The FINAL answer must be JSON with exactly ONE key: "content".
+- The value of "content" must be a single plain text string that contains the formatted summary, policy code, test code, and results.
+- Preserve indentation, line breaks, headings, and code fences.
+- Do NOT include any unnecessary escaping.
+- Do NOT include any additional JSON fields.
+- The text inside "content" must be human-readable.
+- The user request is made of Korean, your content also constructed with Korean.
+============================================================
+
+End of instructions. Begin the workflow now.
 """
-
-@mcp_server.prompt("opa_test_prompt")
-def get_opa_test_prompt() -> str:
-    """
-    Get a opa test prompt.
-    """
-    return """
-Test the policy with the policy code and test code as input, using 'opa_test' tool.
-Policy code is the main rego code to be tested, and test code is to test the policy.
-[Policy code]
-{policy_code}
-
-[Test code]
-{test_code}
-
-Output must be consisted of JSON only, with two keys below:
-    "validation": True/False,
-    "validation_msg": The result of the test. All the test details must be shown
-"""
-
-
-@mcp_server.prompt("opa_summary_prompt")
-def get_opa_summary_prompt() -> str:
-    """
-    Summarize the OPA policy generation and validation results.
-    """
-    return """
-Summarize the OPA policy generation and validation results clearly and concisely.
-
-[Policy code]
-{policy_code}
-
-[Test code]
-{test_code}
-
-[Test result]
-{validation_result}
-
-Context:
-- The user requested a specific API access control policy.
-- You generated Rego policy code and a corresponding test file.
-- The policy syntax was checked and validated using OPA tools.
-- The test results indicate whether the policy logic works as intended.
-
-Output Format:
-Provide a short summary including:
-1. A one-line description of the policy goal.
-2. Whether the syntax check passed or failed.
-3. Whether the OPA tests passed or failed.
-4. A brief explanation of any detected issue or final validation success.
-5. Full-text of the Policy code and test code, and the test result.
-
-Rules:
-- The request is made of Korean, your output must be in Korean.
-- Present the summary, policy code, test code, and test results in a visually clean and natural format.
-- Keep indentation, spacing, and newlines for readability.
-- Output plain text only (no JSON). Never insert the JSON.
-- Keep the tone concise and professional.
-
-Example output:
-"The generated policy controls user access based on roles and time. Syntax and tests passed successfully."
-"""
-
 
 # -------------------------------
 # Tool: Rego 코드 테스트

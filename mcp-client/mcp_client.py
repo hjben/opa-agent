@@ -1,6 +1,6 @@
 import ast
 import json
-import asyncio
+import re
 
 from typing import Optional, Dict
 from fastapi import FastAPI, HTTPException
@@ -25,7 +25,48 @@ class MCPClientManager:
         self.prompts = {}
         self.mcp_client = None
 
-        self.prompts_list = ["base", "analyze_request", "get_policy_info", "rego_gen", "test_rego_gen", "opa_test", "opa_summary"]
+        self.prompts_list = ["base", "analyze_request", "get_policy_info", "rego_gen"]
+
+    @staticmethod
+    def parse_result(text: str):
+        """
+        Safely extract content from a single ```json or ```markdown block.
+        Handles cases where ``` may appear inside the block.
+        The trailing ``` is removed.
+
+        Args:
+            text (str): Input string containing either a JSON or Markdown code block.
+
+        Returns:
+            dict:
+                - If ```json: parsed JSON object
+                - If ```markdown: {"content": <text>}
+            None if no matching block found.
+        """
+        # 우선 블록 시작 위치 찾기
+        json_start = text.find("```json")
+        md_start = text.find("```markdown")
+
+        if json_start != -1:
+            # 마지막 ``` 위치 찾기
+            end_pos = text.rfind("```")
+            if end_pos <= json_start:
+                return None
+            json_text = text[json_start + len("```json"):end_pos].strip()
+            try:
+                return json.loads(json_text)
+            except json.JSONDecodeError as e:
+                print(e)
+                return None
+
+        if md_start != -1:
+            end_pos = text.rfind("```")
+            if end_pos <= md_start:
+                return None
+            md_text = text[md_start + len("```markdown"):end_pos].strip()
+            return {"content": md_text}
+
+        return None
 
     @staticmethod
     def extract_result(text: str) -> Optional[Dict]:
@@ -154,27 +195,6 @@ class MCPClientManager:
 
         return result
     
-    async def opa_test(self, policy_code: str, test_code: str):
-        """
-        Test OPA Rego policy with given policy code and test code.
-        """
-        llm_text = await self.llm_call(self.prompts["opa_test"].format(policy_code=policy_code, test_code=test_code))
-        print(llm_text)
-        result_json = self.extract_result(llm_text)
-        
-        
-        return {
-            "validation": result_json.get("validation"),
-            "validation_msg": result_json.get("validation_msg")
-            }
-    
-    async def opa_summary(self, policy_code, test_code, validation_msg):
-        """
-        Generate final output to End User.
-        """
-        llm_text = await self.llm_call(self.prompts["opa_summary"].format(policy_code=policy_code, test_code=test_code, validation_result=validation_msg))
-
-        return llm_text
     
 # ===============================
 # FastAPI Startup
@@ -223,7 +243,7 @@ async def get_policy(request: dict):
     llm_text = await client_manager.llm_call(
         client_manager.prompts["get_policy_info"].format(user_query=user_query)
     )
-    res_json = client_manager.extract_result(llm_text)
+    res_json = client_manager.parse_result(llm_text)
     print(res_json)
 
     return {
@@ -239,32 +259,10 @@ async def generate_policy(request: dict):
     user_query = request.get("query")
 
     print(f"Generating policy...")
-    gen_llm_text = await client_manager.llm_call(client_manager.prompts["rego_gen"].format(user_request=user_query))
-    gen_result_json = client_manager.extract_result(gen_llm_text)
-    rego_code = gen_result_json.get("rego_code")
+    result = await client_manager.llm_call(client_manager.prompts["rego_gen"].format(user_query=user_query))
+    print(result)
+    parsed_result = client_manager.parse_result(result)
+    print(parsed_result)
 
-    print(f"Generating test policy...")
-    test_llm_text = await client_manager.llm_call(client_manager.prompts["test_rego_gen"].format(rego_code=rego_code))
-    test_gen_result_json = client_manager.extract_result(test_llm_text)
-    test_code = test_gen_result_json.get("rego_code")
-
-    print(f"Testing policy...")
-    opa_test_llm_text = await client_manager.llm_call(client_manager.prompts["opa_test"].format(policy_code=rego_code, test_code=test_code))
-    opa_test_result_json = client_manager.extract_result(opa_test_llm_text)
-
-    final_result = await client_manager.llm_call(
-        client_manager.prompts["opa_summary"].format(
-            policy_code=rego_code,
-            test_code=test_code,
-            validation_result=opa_test_result_json.get("validation_msg")
-        )
-    )
-
-    return {
-        "status": "success",
-        "policy": rego_code,
-        "test_policy": test_code,
-        "opa_test_result": {"validation": opa_test_result_json.get("validation"), "validation_msg": opa_test_result_json.get("validation_msg")},
-        "summary": final_result
-    }
+    return parsed_result
 
