@@ -23,7 +23,68 @@ def get_agent_prompt() -> str:
     """
     Get a base prompt for the AI agent.
     """
-    return "You are an OPA (Open Policy Agent) policy generator."
+    return "You are an OPA (Open Policy Agent) policy manager."
+
+
+@mcp_server.prompt("analyze_request_prompt")
+def get_policy_prompt() -> str:
+    """
+    Get a prompt fpr analyzing user request and select a API.
+    """
+    return """
+You are an "API Routing Agent" for an internal service.
+
+Your job:
+1. Understand the user's natural language request.
+2. Select the most appropriate API from the API catalog.
+3. Generate the exact API call parameters needed for that request.
+4. Do NOT make assumptions. If information is missing, mark it as null.
+5. Only choose one API unless the task clearly requires multiple steps.
+
+You MUST respond ONLY in the JSON format defined below.
+Never add explanations.
+"""
+
+@mcp_server.prompt("get_policy_info_prompt")
+def get_policy_info_prompt() -> str:
+    """
+    Get a policy for proper policy information prompt.
+    """
+    return """
+Your job is to analyze OPA policies and explain them clearly to the user.
+You can get all the current policies with 'list_policies' tool.
+
+You MUST:
+1. Understand the meaning and logic of the provided Rego policies.
+2. Explain what each rule does in simple terms.
+3. Extract key conditions, permission logic, and decision branches.
+4. Answer the user's request based strictly on the given policies.
+5. If the policy is invalid or contains syntax problems, identify them and explain.
+7. Output must be a JSON with two keys only: user_query, content. In 'content' key, add all your results in string type.
+6. If the user query is Korean, also answer in Korean.
+
+User Request:
+"{user_query}"
+
+Your Tasks:
+1. Provide a concise summary of what the policy set does.
+2. List key rules and the logic behind them.
+3. Explain how authorization is determined.
+4. Based on the user's request, give an appropriate answer:
+   - If user wants explanation → explain clearly.
+   - If user asks what is allowed/denied → answer using policy logic.
+   - If user wants examples → provide examples.
+   - If user wants modification suggestions → propose safe improvements.
+5. Include a "Reasoning Based on Policy" section that directly cites relevant rules.
+
+Avoid:
+- Give information about only related to the user request.
+- Adding new rules not present in the policy.
+- Making assumptions outside the policy.
+
+Your responses must be precise, structured, and helpful.
+"""
+
 
 @mcp_server.prompt("rego_gen_prompt")
 def get_rego_gen_prompt() -> str:
@@ -37,7 +98,7 @@ Generate a valid OPA Rego policy based on the request below.
 {user_request}
 
 Rules:
-- When generating a policy, refer the current policies. You can get current policies with 'list_policies' tool.
+- When generating a policy, refer the current policies. You can get all the current policies with 'list_policies' tool.
 - Ensure the policy follows valid Rego syntax (with 'opa check' tool).
 - If the generated code is not valid, re-generate code until the code is good enough.
 - `if` keyword is required before the rule body starts.

@@ -25,7 +25,7 @@ class MCPClientManager:
         self.prompts = {}
         self.mcp_client = None
 
-        self.prompts_list = ["base", "rego_gen", "test_rego_gen", "opa_test", "opa_summary"]
+        self.prompts_list = ["base", "analyze_request", "get_policy_info", "rego_gen", "test_rego_gen", "opa_test", "opa_summary"]
 
     @staticmethod
     def extract_result(text: str) -> Optional[Dict]:
@@ -140,7 +140,6 @@ class MCPClientManager:
         })
 
         tools = await self.mcp_client.get_tools()
-
         for prompt in self.prompts_list:
             self.prompts[prompt] = (await self.mcp_client.get_prompt("opa_tools", f"{prompt}_prompt"))[0].content
 
@@ -154,32 +153,6 @@ class MCPClientManager:
                 result += chunk_msg.content
 
         return result
-
-    async def generate_policy(self, user_request: str):
-        """
-        Generate OPA Rego policy and test code using LLM, validate via MCP Server.
-        """
-        llm_text = await self.llm_call(self.prompts["rego_gen"].format(user_request=user_request))
-        result_json = self.extract_result(llm_text)
-
-        return {
-            "policy": result_json.get("rego_code"),
-            "is_valid": result_json.get("is_valid"),
-            "error_message": result_json.get("error_message")
-            }
-    
-    async def generate_test_policy(self, rego_code: str):
-        """
-        Generate OPA Rego policy and test code using LLM, validate via MCP Server.
-        """
-        llm_text = await self.llm_call(self.prompts["test_rego_gen"].format(rego_code=rego_code))
-        result_json = self.extract_result(llm_text)
-
-        return {
-            "policy": result_json.get("rego_code"),
-            "is_valid": result_json.get("is_valid"),
-            "error_message": result_json.get("error_message")
-            }
     
     async def opa_test(self, policy_code: str, test_code: str):
         """
@@ -202,7 +175,7 @@ class MCPClientManager:
         llm_text = await self.llm_call(self.prompts["opa_summary"].format(policy_code=policy_code, test_code=test_code, validation_result=validation_msg))
 
         return llm_text
-
+    
 # ===============================
 # FastAPI Startup
 # ===============================
@@ -220,6 +193,44 @@ async def startup_event():
 # ===============================
 # FastAPI Endpoint
 # ===============================
+@app.post("/user_request")
+async def process_user_request(request: dict):
+    """
+    Analyze user request and choose the proper API
+    """
+    user_query = request.get("query")
+
+    if not user_query:
+        raise HTTPException(status_code=400, detail="Missing 'request' field.")
+
+    result = await client_manager.llm_call(client_manager.prompts["request_analyze"])
+
+    # TODO: 분류 결과 별 API 호출
+    res = result
+
+    return {
+        "status": "success",
+        "response": res
+    }
+
+@app.post("/get_policy_info")
+async def get_policy(request: dict):
+    """
+    Get current policie(s) information in OPA system.
+    """
+    user_query = request.get("query")
+
+    llm_text = await client_manager.llm_call(
+        client_manager.prompts["get_policy_info"].format(user_query=user_query)
+    )
+    res_json = client_manager.extract_result(llm_text)
+    print(res_json)
+
+    return {
+        "status": "success",
+        "response": res_json
+    }
+
 @app.post("/generate_policy")
 async def generate_policy(request: dict):
     """
@@ -227,68 +238,33 @@ async def generate_policy(request: dict):
     """
     user_query = request.get("query")
 
-    if not user_query:
-        raise HTTPException(status_code=400, detail="Missing 'request' field.")
-
-    # 1️⃣ OPA Policy 생성
     print(f"Generating policy...")
-    gen_result = await client_manager.generate_policy(user_query)
+    gen_llm_text = await client_manager.llm_call(client_manager.prompts["rego_gen"].format(user_request=user_query))
+    gen_result_json = client_manager.extract_result(gen_llm_text)
+    rego_code = gen_result_json.get("rego_code")
 
-    rego_code = gen_result["policy"]
-
-    # 2️⃣ OPA Test Policy 생성
     print(f"Generating test policy...")
-    test_gen_result = await client_manager.generate_test_policy(rego_code)
-    test_code = test_gen_result["policy"]
+    test_llm_text = await client_manager.llm_call(client_manager.prompts["test_rego_gen"].format(rego_code=rego_code))
+    test_gen_result_json = client_manager.extract_result(test_llm_text)
+    test_code = test_gen_result_json.get("rego_code")
 
-    # 3️⃣ OPA Test 실행
     print(f"Testing policy...")
-    test_result = await client_manager.opa_test(rego_code, test_code)
+    opa_test_llm_text = await client_manager.llm_call(client_manager.prompts["opa_test"].format(policy_code=rego_code, test_code=test_code))
+    opa_test_result_json = client_manager.extract_result(opa_test_llm_text)
 
-    # 4️⃣ LLM 호출로 요약 결과 생성
     final_result = await client_manager.llm_call(
         client_manager.prompts["opa_summary"].format(
             policy_code=rego_code,
             test_code=test_code,
-            validation_result=test_result.get("validation_msg", "")
+            validation_result=opa_test_result_json.get("validation_msg")
         )
     )
 
-    # 5️⃣ 최종 응답
     return {
         "status": "success",
         "policy": rego_code,
         "test_policy": test_code,
-        "opa_test_result": test_result,
+        "opa_test_result": {"validation": opa_test_result_json.get("validation"), "validation_msg": opa_test_result_json.get("validation_msg")},
         "summary": final_result
     }
 
-
-# ===============================
-# Local Test
-# ===============================
-if __name__ == "__main__":
-    async def local_test():
-        await client_manager.initialize()
-        gen_result = await client_manager.generate_policy(
-            "관리자는 언제든 접근 가능하고, 일반 사용자는 근무시간 중 자신의 리소스만 수정할 수 있는 정책을 만들어줘.",
-        )
-        print(f"Generating policy...")
-        rego_code = gen_result["policy"]
-        print(rego_code)
-
-        print(f"Generating Test OPA policy...")
-        test_gen_result = await client_manager.generate_test_policy(rego_code)
-        test_code = test_gen_result["policy"]
-        print(test_code)
-
-        print(f"Testing OPA policy...")
-        test_result = await client_manager.opa_test(rego_code, test_code)
-        print(json.dumps(test_result, indent=2))
-
-        print(f"Generating outputs...")
-        final_result = await client_manager.llm_call(client_manager.prompts["opa_summary"].format(policy_code=rego_code, test_code=test_code, validation_result=test_result["validation_msg"]))
-
-        print(final_result)
-
-    asyncio.run(local_test())

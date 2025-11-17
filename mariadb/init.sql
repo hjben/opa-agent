@@ -1,17 +1,16 @@
 -- ========================================
--- 1️⃣ Database 생성 (없을 경우에만)
+-- Database 생성
 -- ========================================
 CREATE DATABASE IF NOT EXISTS opa_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE opa_db;
 
 -- ========================================
--- 2️⃣ user 테이블
+-- user 테이블
 -- ========================================
 CREATE TABLE IF NOT EXISTS user (
     emp_id VARCHAR(20) PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     dept VARCHAR(100),
-    role VARCHAR(100)
 );
 
 -- 샘플 데이터 (이미 존재하지 않을 때만 추가)
@@ -44,53 +43,28 @@ CREATE TABLE IF NOT EXISTS api (
 
 -- 1. 리소스 조회
 INSERT INTO api (name, endpoint, method, description)
-SELECT 'GetResource', '/api/resource/{resource_id}', 'GET', 'Retrieve resource details (mock)'
+SELECT 'GetResource', '/api/resource/{resource_id}', 'GET', 'Retrieve resource details'
 WHERE NOT EXISTS (SELECT 1 FROM api WHERE name='GetResource');
 
 -- 2. 리소스 생성
 INSERT INTO api (name, endpoint, method, description)
-SELECT 'CreateResource', '/api/resource/create', 'POST', 'Create a new resource (mock only)'
+SELECT 'CreateResource', '/api/resource/create', 'POST', 'Create a new resource'
 WHERE NOT EXISTS (SELECT 1 FROM api WHERE name='CreateResource');
 
 -- 3. 리소스 수정
 INSERT INTO api (name, endpoint, method, description)
-SELECT 'ModifyResource', '/api/resource/modify', 'POST', 'Modify a resource (mock only)'
+SELECT 'ModifyResource', '/api/resource/modify', 'POST', 'Modify a resource'
 WHERE NOT EXISTS (SELECT 1 FROM api WHERE name='ModifyResource');
 
 -- 4. 리소스 삭제
 INSERT INTO api (name, endpoint, method, description)
-SELECT 'DeleteResource', '/api/resource/{resource_id}', 'DELETE', 'Delete a resource (mock only)'
+SELECT 'DeleteResource', '/api/resource/{resource_id}', 'DELETE', 'Delete a resource'
 WHERE NOT EXISTS (SELECT 1 FROM api WHERE name='DeleteResource');
 
 -- 5. 리포트 생성
 INSERT INTO api (name, endpoint, method, description)
 SELECT 'GenerateReport', '/api/report/generate', 'POST', 'Generate a mock report'
 WHERE NOT EXISTS (SELECT 1 FROM api WHERE name='GenerateReport');
-
-
--- ========================================
--- 4️⃣ policy 테이블
--- ========================================
-CREATE TABLE IF NOT EXISTS policy (
-    policy_id INT AUTO_INCREMENT PRIMARY KEY,
-    policy_name VARCHAR(100) NOT NULL,
-    description TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    created_by VARCHAR(20),
-    FOREIGN KEY (created_by) REFERENCES user(emp_id)
-);
-
-INSERT INTO policy (policy_name, description, created_by)
-SELECT 'DataAccessPolicy', 'Controls data access permissions based on user roles', 'E003'
-WHERE NOT EXISTS (SELECT 1 FROM policy WHERE policy_name='DataAccessPolicy');
-
-INSERT INTO policy (policy_name, description, created_by)
-SELECT 'ServiceAccessPolicy', 'Defines service-level API permissions for internal users', 'E002'
-WHERE NOT EXISTS (SELECT 1 FROM policy WHERE policy_name='ServiceAccessPolicy');
-
-INSERT INTO policy (policy_name, description, created_by)
-SELECT 'DefaultPolicy', 'Fallback policy for unregistered users', 'E001'
-WHERE NOT EXISTS (SELECT 1 FROM policy WHERE policy_name='DefaultPolicy');
 
 
 -- ========================================
