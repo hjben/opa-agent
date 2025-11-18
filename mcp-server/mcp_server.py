@@ -1,15 +1,18 @@
 from mcp.server.fastmcp import FastMCP
 from service.mariadb import get_user_by_id, get_all_users
-from service.opa import get_all_policies
 # from service.qdrant import QdrantService
 
 import json
 import os
+import requests
 import tempfile
 import subprocess
 
 # Qdrant 연결
 # qdrant = QdrantService(url="http://qdrant:6333")
+
+DUMMY_API_URL = "http://localhost:8085"
+OPA_URL = "http://localhost:8181/v1/policies"
 
 # MCP Server 생성
 mcp_server = FastMCP(name="opa_tools", host="0.0.0.0", port="8001", debug=True)
@@ -26,33 +29,158 @@ def get_agent_prompt() -> str:
     return "You are an OPA (Open Policy Agent) policy manager."
 
 
-@mcp_server.prompt("analyze_request_prompt")
-def get_policy_prompt() -> str:
-    """
-    Get a prompt fpr analyzing user request and select a API.
-    """
+@mcp_server.prompt("opa_orchestrator_prompt")
+def analyze_request_prompt() -> str:
+
     return """
-You are an "API Routing Agent" for an internal service.
+Main OPA Orchestrator Prompt
+----------------------------------------------------
 
-Your job:
-1. Understand the user's natural language request.
-2. Select the most appropriate API from the API catalog.
-3. Generate the exact API call parameters needed for that request.
-4. Do NOT make assumptions. If information is missing, mark it as null.
-5. Only choose one API unless the task clearly requires multiple steps.
+This is the top-level orchestrator for all OPA policy management tasks.
+It supports *multiple user intentions in a single request* and intelligently
+breaks them down into atomic tasks, then assigns the correct sub-prompt,
+tool usage, and parameters for each task.
 
-You MUST respond ONLY in the JSON format defined below.
-Never add explanations.
+============================================================
+[User Request]
+{user_query}
+============================================================
+
+Your role: “OPA Policy Management Orchestrator with Multi-Intent Routing”
+
+------------------------------------------------------------------------
+1. Intent Extraction
+------------------------------------------------------------------------
+- Parse the user's request and extract ALL distinct intentions.
+- If multiple goals are mentioned in one sentence, separate them into different tasks.
+- If the same goal is repeated (even with different wording), merge into a single task.
+- Normalize text for duplicates: lowercase, strip spaces, remove punctuation.
+- Output ONLY in a JSON array with the following format:
+    [
+        {{ "intent_id": 1, "intent_text": "..." }},
+        {{ "intent_id": 2, "intent_text": "..." }}
+    ]
+
+Example:
+    Input: "Show me the policy for user access. Also update admin rule. Delete old test policy."
+    Output:
+    [
+        {{ "intent_id": 1, "intent_text": "Show me the policy for user access" }},
+        {{ "intent_id": 2, "intent_text": "Update admin rule" }},
+        {{ "intent_id": 3, "intent_text": "Delete old test policy" }}
+    ]
+
+------------------------------------------------------------------------
+2. Categorize Each Intent
+------------------------------------------------------------------------
+
+- Assign each intent to EXACTLY ONE category:
+    A. Policy Explanation  
+    B. New Policy Generation  
+    C. Policy Update / Modify / Deletion
+    D. Non-OPA / unclear → mark as "unknown"
+- You MUST NOT guess meaning beyond the text. If insufficient → mark missing fields as null.
+- Include representative examples in classification to improve accuracy.
+    * Category A → explanation of current policies
+    * Category B → create new policy
+    * Category C → modify/update/delete existing policy
+    * unknown → clarification needed
+
+Example output:
+    [
+        {{ "intent_id": 1, "category": "A" }},
+        {{ "intent_id": 2, "category": "C" }},
+        {{ "intent_id": 3, "category": "D" }}
+    ]
+
+------------------------------------------------------------------------
+3. Map Each Category to a Sub-Prompt
+------------------------------------------------------------------------
+- Category A → use `get_policy_prompt`  
+  Required params: {{
+      "user_query": "<raw user query>"
+      "policy_id": "<policy_id if provided>",
+    }}
+
+- Category B → use `rego_gen_prompt`  
+  Required params: {{ 
+      "user_query": "<raw user query>"
+  }}
+
+- Category C → use `rego_update_prompt`  
+  Required params: {{ 
+      "user_query": "<raw user query>",
+      "policy_code": "<existing policy code to process>",
+      "policy_id": "<policy_id>",
+      "update_type": "<add|modify|remove>"
+  }}
+
+- "unknown" → return a clarification request
+
+You MUST prepare the `target_prompt` and `params` for EACH intent.
+Example output:
+[
+    {{
+        "intent_id": 1,
+        "target_prompt": "rego_update_prompt",
+        "params": {{
+            "policy_id": "authz",
+            "update_type": "modify",
+            "policy_code": "<existing policy code>",
+            "user_query": "<raw user query>"
+        }}
+    }},
+    {{
+        "intent_id": 2,
+        "target_prompt": "rego_gen_prompt",
+        "params": {{
+            "policy_id": null,
+            "user_query": "<raw user query>"
+        }}
+    }}
+]
+
+------------------------------------------------------------------------
+4. Final Output Structure (Required)
+------------------------------------------------------------------------
+Return ONLY a JSON in the following format:
+
+{{
+    "tasks": [
+        {{
+            "intent_id": <number>,
+            "intent_text": "<raw text>",
+            "category": "<A|B|C|unknown>",
+            "target_prompt": "<prompt_name or null>",
+            "params": {{ ... }}
+        }},
+        ...
+    ],
+    "notes": "<short reasoning (same language as user)>"
+}}
+
+Rules:
+- NEVER include code fences
+- NEVER generate Rego code here
+- NEVER validate policy here
+- ONLY route tasks and prepare next actions
+- "notes" must be short & high-level
+- If user writes in Korean, "notes" must also be Korean
+
+============================================================
+End of orchestrator instructions.
+
 """
 
-@mcp_server.prompt("get_policy_info_prompt")
-def get_policy_info_prompt() -> str:
+@mcp_server.prompt("get_policy_prompt")
+def get_policy_prompt() -> str:
     """
     Get a policy for proper policy information prompt.
     """
     return """
 Your job is to analyze OPA policies and explain them clearly to the user.
-You can get all the current policies with 'list_policies' tool.
+You can get the current policies with 'list_policies' tool.
+The policy_id is an optional parameter. if it's None, call the tool without it.
 
 You MUST:
 1. Understand the meaning and logic of the provided Rego policies.
@@ -60,14 +188,12 @@ You MUST:
 3. Extract key conditions, permission logic, and decision branches.
 4. Answer the user's request based strictly on the given policies.
 5. If the policy is invalid or contains syntax problems, identify them and explain.
-7. Output must be a JSON with two keys only: user_query, content. In 'content' key, add all your results in string type.
-6. If the user query is Korean, also answer in Korean.
 
 User Request:
-"{user_query}"
+{user_query}
 
 Your Tasks:
-1. Provide a concise summary of what the policy set does.
+1. Provide a concise summary of what the policy set does. Give information about only related to the user request.
 2. List key rules and the logic behind them.
 3. Explain how authorization is determined.
 4. Based on the user's request, give an appropriate answer:
@@ -78,16 +204,22 @@ Your Tasks:
 5. Include a "Reasoning Based on Policy" section that directly cites relevant rules.
 
 Avoid:
-- Give information about only related to the user request.
 - Adding new rules not present in the policy.
 - Making assumptions outside the policy.
 
-Your responses must be precise, structured, and helpful.
+Output Rules:
+- Provide a JSON with exactly two keys: "user_query" and "content". add all your results in string type.
+- The "content" value must be a **Markdown-formatted string**, including:
+    - ## Summary: concise explanation of the policies
+    - ## Policy Code: fenced code block (```rego```) for policy code
+    - ## Key Rules: explanation of rules, decision logic, and examples
+- Do NOT add other JSON keys or code fences outside of the Markdown in "content".
+- If the user query is written in Korean, also answer in Korean.
+- Your responses must be precise, structured, and helpful.
 """
 
-
 @mcp_server.prompt("rego_gen_prompt")
-def get_total_rego_gen_prompt() -> str:
+def get_rego_gen_prompt() -> str:
     """
     Summarize the OPA policy generation and validation results.
     """
@@ -106,6 +238,8 @@ Your tasks:
 1. Generate Rego Policy Code
 ------------------------------------------------------------
 - Generate a valid OPA Rego policy that satisfies the user request.
+- Keep in mind that the policy MUST be implemented to the existing APIs. Check the possibility before generating the policy.
+  The existing API list is given by `list_apis` tool.
 - Refer to the current OPA policies using the `list_policies` tool.
 - Ensure strict Rego syntax correctness.
 - The generated policy must:
@@ -207,8 +341,9 @@ and all OPA tests have passed successfully.
 
 
 [Output Rules]
-- The FINAL answer must be JSON with exactly ONE key: "content".
+- The FINAL answer must be JSON with exactly TWO key: "content" and "policy_code".
 - The value of "content" must be a single plain text string that contains the formatted summary, policy code, test code, and results.
+- In the "policy_code" key, repeat the policy code with a single plain text string.
 - Preserve indentation, line breaks, headings, and code fences.
 - Do NOT include any unnecessary escaping.
 - Do NOT include any additional JSON fields.
@@ -217,6 +352,51 @@ and all OPA tests have passed successfully.
 ============================================================
 
 End of instructions. Begin the workflow now.
+"""
+
+@mcp_server.prompt("rego_update_prompt")
+def get_rego_update_prompt() -> str:
+    """
+    Get a policy for proper policy information prompt.
+    """
+    return """
+
+[User Request]
+{user_query}
+
+{policy_code}
+
+[Policy ID]
+{policy_id}
+
+[Update type]
+{update_type}
+
+Your job is to create, update, or delete OPA Rego policies based on the user request, 
+and respond with the exact tool instructions needed to apply the modification.
+
+You MUST:
+1. Correctly interpret the user's requested modification (add, update, remove).
+2. Understand the meaning and logic of the existing Rego policy.
+3. Validate the syntax and semantics of any updated or newly generated Rego code.
+4. When modifying a policy:
+   - Identify the affected package, rule, and logical conditions.
+   - Generate the updated Rego block exactly as it should appear.
+5. When deleting a policy or rule:
+   - Identify the correct policy_id or rule name to remove.
+   - Ensure no partial or inconsistent deletions occur.
+6. If the user query is written in Korean, then all explanations must be in Korean.
+7. The policy_id is optional parameter. If provided, use it to query the target policy.
+
+Output Rules:
+- Return a JSON with exactly two keys: "user_query" and "content".
+- The "content" value must be **Markdown-formatted** and include:
+    - ## User request: what the LLM understood
+    - ## Modification Plan: steps or rules being changed
+    - ## Target Policy Code: fenced code block (```rego```) with updated code
+    - ## Explanation: short reasoning in same language as user
+- No extra code fences outside the Markdown.
+- Preserve formatting, indentation, and newlines.
 """
 
 # -------------------------------
@@ -400,37 +580,31 @@ async def get_user_tool(data: dict):
     return {"users": get_all_users()}
 
 @mcp_server.tool("list_policies")
-def list_policies_tool():
+def list_policies_tool(policy_id: str = None):
     """
     Tool Name: list_policies
     --------------------
     Description:
-        Fetches all policies currently registered in the connected OPA server and
-        returns their complete definitions (or error details if retrieval fails).
+        Fetches policies from the connected OPA server.
 
-        The tool queries the OPA HTTP API to obtain the list of policy IDs and then
-        requests each policy's content. The returned payload is suitable for display
-        or further processing by an agent (for example, to review, edit, or test policies).
+        If a specific policy_id is provided, the tool retrieves only that policy.
+        If policy_id is omitted or None, the tool returns all registered policies.
 
-        This tool does not modify any policy on the OPA server; it performs read-only
-        operations. Network or OPA-side errors are surfaced in the returned JSON.
+        The returned payload includes complete policy definitions or error details.
+        This tool performs read-only operations and does not modify any OPA data.
 
     Args:
-        data: dict (optional)
-            - None required for the current implementation.
-            - If provided, the dict may include optional keys for future extensions
-            (e.g., "filter", "policy_id" or "include_metadata"). Current tool
-            version ignores any input and always returns the full policy list.
+        policy_id: str (optional)
+            - If provided, fetches only the policy matching this ID.
+            - If None, fetches all policies currently registered in OPA.
 
     Returns (JSON):
         {
             "policies": dict
-                - Mapping from policy_id (str) to policy details (dict).
-                - Each policy details dict typically contains the raw policy text and
-                any extra metadata returned by OPA (or an error object if retrieval failed).
+                - Mapping from policy_id to policy details or error info.
 
             "error": str (optional)
-                - Present only if a top-level failure occurred while contacting OPA.
+                - Present only if a top-level OPA request failure occurred.
 
         Example:
         {
@@ -438,17 +612,193 @@ def list_policies_tool():
                 "example_policy": {
                     "id": "example_policy",
                     "raw": "package policy\n\ndefault allow := false\n...",
-                    "metadata": { ... }    # optional, depends on OPA response
+                    "metadata": { ... }
                 },
-                "another_policy": {
-                    "error": "Failed to retrieve policy: 404 Not Found"
+                "missing_policy": {
+                    "error": "Failed to retrieve: 404 Not Found"
                 }
             }
         }
     """
-    policies = get_all_policies()
+    if policy_id is not None:
+        res = requests.get(f"{OPA_URL}/{policy_id}")
+    else:
+        res = requests.get(OPA_URL)
 
-    return json.dumps(policies, indent=2, ensure_ascii=False)
+    if res.status_code != 200:
+        return {
+            "error": f"OPA responded with {res.status_code}",
+            "detail": res.text
+        }
+
+    data = res.json()
+
+    # policies 필드가 없는 경우 방어 처리
+    policies = data.get("result", data)
+
+    # 정책 상세를 모두 가져오기
+    result = {}
+    for policy in policies:
+        result[policy['id']] = policy['raw']
+
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@mcp_server.tool("update_policy")
+def update_policy(policy_id: str, policy_str: str):
+    """
+    Tool Name: update_policy
+    --------------------
+    Description:
+        Updates an existing OPA policy or creates a new one if the policy_id does not exist.
+
+        The tool sends the provided policy string to the OPA server using a PUT request.
+        OPA will replace the entire policy content corresponding to policy_id with the
+        supplied Rego policy text. This operation fully overwrites the existing policy.
+
+        The tool validates the response status code and returns an error object if
+        the update fails (e.g., invalid Rego, policy not accepted, or network issues).
+
+    Args:
+        policy_id: str
+            - Identifier of the policy to update on the OPA server.
+            - If the ID does not currently exist, OPA will create a new policy.
+
+        policy_str: str
+            - Full Rego policy text to upload.
+            - Must be a syntactically valid Rego module or OPA will reject it.
+
+    Returns (JSON):
+        {
+            "message": str
+                - Confirmation message when the update succeeds.
+
+            "policy_id": str
+                - The updated policy identifier.
+
+            "error": str (optional)
+                - Included if OPA returns a non-success status code.
+
+            "detail": str (optional)
+                - The raw OPA error response text for debugging.
+        }
+
+        Example:
+        {
+            "message": "Policy updated successfully",
+            "policy_id": "example_policy"
+        }
+    """
+    headers = {"Content-Type": "text/plain"}
+    res = requests.put(f"{OPA_URL}/{policy_id}", data=policy_str.encode("utf-8"), headers=headers)
+
+    if res.status_code not in (200, 204):
+        return {
+            "error": f"OPA responded with {res.status_code}",
+            "detail": res.text
+        }
+
+    return {"message": "Policy updated successfully", "policy_id": policy_id}
+
+
+@mcp_server.tool("delete_policy")
+def delete_policy(policy_id: str):
+    """
+    Tool Name: delete_policy
+    --------------------
+    Description:
+        Deletes an existing policy from the OPA server.
+
+        The tool performs an HTTP DELETE request to remove the policy associated
+        with the given policy_id. If the policy does not exist or the OPA server
+        cannot process the request, the tool returns an error description.
+
+        This operation permanently removes the specified policy from OPA and
+        cannot be undone via this tool.
+
+    Args:
+        policy_id: str
+            - Identifier of the policy to delete.
+            - If the policy does not exist, OPA typically returns a 404 status code.
+
+    Returns (JSON):
+        {
+            "message": str
+                - Confirmation message when deletion succeeds.
+
+            "policy_id": str
+                - The deleted policy identifier.
+
+            "error": str (optional)
+                - Present if the deletion request failed.
+
+            "detail": str (optional)
+                - Raw OPA error details for debugging.
+        }
+
+        Example:
+        {
+            "message": "Policy deleted successfully",
+            "policy_id": "example_policy"
+        }
+    """
+    res = requests.delete(f"{OPA_URL}/{policy_id}")
+
+    if res.status_code not in (200, 204):
+        return {
+            "error": f"OPA responded with {res.status_code}",
+            "detail": res.text
+        }
+    return {"message": "Policy deleted successfully", "policy_id": policy_id}
+
+
+@mcp_server.tool("list_api")
+def list_apis_tool():
+    """
+    Function Name: get_api_list
+    ---------------------------
+    Description:
+        Collects and returns all API specifications registered in the current FastAPI
+        application. The function extracts metadata from the FastAPI router, including:
+            - HTTP method
+            - Path
+            - Handler function name
+            - Summary and description (if provided in the FastAPI route definitions)
+            - Request/Response model schemas (if available)
+
+        This function is the internal data provider for the `list_apis` tool. It performs
+        read-only introspection of the FastAPI application and does not modify any routing
+        or OpenAPI configuration.
+
+        The returned structure is suitable for display, analysis, or further processing
+        by agents or tools (e.g., documentation generation, automatic testing, or
+        dynamic routing decisions).
+
+    Args:
+        None
+
+    Returns (dict):
+        {
+            "apis": [
+                {
+                    "path": str,                 # API endpoint path (e.g., "/items/{id}")
+                    "method": str,               # HTTP method ("GET", "POST", ...)
+                    "name": str,                 # Handler function name
+                    "summary": str or None,      # Route summary if defined
+                    "description": str or None,  # Route description if defined
+                    "request_model": dict or None,   # Pydantic schema for request body
+                    "response_model": dict or None   # Pydantic schema for response body
+                },
+                ...
+            ],
+            "error": str (optional)
+                - Present only if an exception occurs during FastAPI route inspection.
+        }
+    """
+    response = requests.get(f"{DUMMY_API_URL}/openapi.json")
+    response.raise_for_status()  # 오류 발생 시 예외
+
+    return json.dumps(response.json(), ensure_ascii=False)
 
 
 # -------------------------------

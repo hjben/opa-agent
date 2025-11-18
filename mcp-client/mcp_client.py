@@ -25,7 +25,7 @@ class MCPClientManager:
         self.prompts = {}
         self.mcp_client = None
 
-        self.prompts_list = ["base", "analyze_request", "get_policy_info", "rego_gen"]
+        self.prompts_list = ["base", "opa_orchestrator", "get_policy", "rego_gen", "rego_update"]
 
     @staticmethod
     def parse_result(text: str):
@@ -69,7 +69,7 @@ class MCPClientManager:
         return None
 
     @staticmethod
-    def extract_result(text: str) -> Optional[Dict]:
+    def extract_last_json(text: str) -> Optional[Dict]:
         """
         Scan `text`, find top-level {...} JSON blocks robustly (ignoring braces inside strings),
         parse them and return the last successfully parsed JSON-like object (as dict).
@@ -213,8 +213,8 @@ async def startup_event():
 # ===============================
 # FastAPI Endpoint
 # ===============================
-@app.post("/user_request")
-async def process_user_request(request: dict):
+@app.post("/opa_request")
+async def opa_request(request: dict):
     """
     Analyze user request and choose the proper API
     """
@@ -223,46 +223,48 @@ async def process_user_request(request: dict):
     if not user_query:
         raise HTTPException(status_code=400, detail="Missing 'request' field.")
 
-    result = await client_manager.llm_call(client_manager.prompts["request_analyze"])
+    try:
+        clsf_result = await client_manager.llm_call(client_manager.prompts["opa_orchestrator"].format(user_query=user_query))
+        clsf_json = client_manager.parse_result(clsf_result)
 
-    # TODO: 분류 결과 별 API 호출
-    res = result
+        if not clsf_json:
+            clsf_json = client_manager.extract_last_json(clsf_result)
+        print(clsf_json)
 
-    return {
-        "status": "success",
-        "response": res
-    }
+        final_res = ""
+        policy_code = ""
+        for task in clsf_json["tasks"]:
+            if task["target_prompt"] is not None:
+                target_prompt = client_manager.prompts[task["target_prompt"].replace("_prompt", "")]
+                
+                if len(policy_code)!=0:
+                    task["params"]["policy_code"] = policy_code
 
-@app.post("/get_policy_info")
-async def get_policy(request: dict):
-    """
-    Get current policie(s) information in OPA system.
-    """
-    user_query = request.get("query")
+                llm_text = await client_manager.llm_call(target_prompt.format(**task["params"]))
+                print(llm_text)
 
-    llm_text = await client_manager.llm_call(
-        client_manager.prompts["get_policy_info"].format(user_query=user_query)
-    )
-    res_json = client_manager.parse_result(llm_text)
-    print(res_json)
+                res_json = client_manager.parse_result(llm_text)
+                if not res_json:
+                    res_json = client_manager.extract_last_json(llm_text)
+                print(res_json)
 
-    return {
-        "status": "success",
-        "response": res_json
-    }
+                if task["category"] == "B": # 생성된 코드가 있는 경우
+                    policy_code = res_json["policy_code"]
+                else:
+                    policy_code = ""
 
-@app.post("/generate_policy")
-async def generate_policy(request: dict):
-    """
-    Generate OPA policy, test policy, run OPA test, and produce summary output.
-    """
-    user_query = request.get("query")
+                final_res += res_json["content"] + '\n'
+        
+        if len(final_res)==0:
+            final_res = clsf_json["notes"]
 
-    print(f"Generating policy...")
-    result = await client_manager.llm_call(client_manager.prompts["rego_gen"].format(user_query=user_query))
-    print(result)
-    parsed_result = client_manager.parse_result(result)
-    print(parsed_result)
-
-    return parsed_result
-
+        return {
+            "status": "success",
+            "content": final_res
+        }
+    except Exception as e:
+        print(e)
+        return {
+            "status": "fail",
+            "content": str(e)
+        }

@@ -38,6 +38,14 @@ def opa_authorize(request: Request):
 
     if not result.get("result", False):
         raise HTTPException(status_code=403, detail="Access denied by OPA policy")
+    
+
+# ---------------------------
+# API Spec
+# ---------------------------
+@app.get("/openapi.json")
+def get_openapi_spec():
+    return app.openapi()
 
 # ---------------------------
 # Resource CRUD
