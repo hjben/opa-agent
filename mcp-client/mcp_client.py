@@ -9,7 +9,7 @@ from langgraph.prebuilt import create_react_agent
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from mariadb.db_connection import db_cursor
-from config.url_config import OPA_DATA_URL_USERS, OPA_DATA_URL_RESOURCES
+from config.url_config import OPA_DATA_URL
 
 app = FastAPI(title="MCP OPA Client")
 
@@ -297,7 +297,7 @@ def sync_all_to_opa():
                     "dept": u["dept"],
                     "is_admin": bool(u["is_admin"])
                 }
-        resp_users = requests.put(OPA_DATA_URL_USERS, json=users_data)
+        resp_users = requests.put(f"{OPA_DATA_URL}/users", json=users_data)
         if resp_users.status_code != 204:
             raise HTTPException(status_code=500, detail=f"Failed to update users in OPA: {resp_users.text}")
 
@@ -307,7 +307,7 @@ def sync_all_to_opa():
             cursor.execute("SELECT resource_id, owner FROM dummy_resource")
             for r in cursor.fetchall():
                 resources_data[r["resource_id"]] = r["owner"]
-        resp_resources = requests.put(OPA_DATA_URL_RESOURCES, json=resources_data)
+        resp_resources = requests.put(f"{OPA_DATA_URL}/resource_owners", json=resources_data)
         if resp_resources.status_code != 204:
             raise HTTPException(status_code=500, detail=f"Failed to update resources in OPA: {resp_resources.text}")
 

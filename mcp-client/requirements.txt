@@ -2,7 +2,6 @@ fastapi
 uvicorn
 httpx
 mcp
-langextract
 langchain
 langchain-openai
 langchain-mcp-adapters

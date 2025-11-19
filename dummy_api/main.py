@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from config.url_config import OPA_ALLOW_URL
+from config.url_config import OPA_DATA_URL
 import requests
 from mariadb.db_connection import db_cursor
 
@@ -37,11 +37,9 @@ def opa_authorize(request: Request, resource_id: Optional[str] = None):
         "resource_id": resource_id
     }
 
-    print(payload)
-
-    response = requests.post(OPA_ALLOW_URL, json={"input": payload})
+    response = requests.post(f"{OPA_DATA_URL}/httpapi/allow", json={"input": payload})
     if response.status_code != 200:
-        raise HTTPException(status_code=500, detail="OPA server error")
+        raise HTTPException(status_code=response.status_code, detail="OPA server error")
 
     result = response.json()
     if not result.get("result", False):

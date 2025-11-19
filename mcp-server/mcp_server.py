@@ -1,5 +1,5 @@
 from mcp.server.fastmcp import FastMCP
-from config.url_config import DUMMY_API_URL, OPA_POLICY_URL
+from config.url_config import DUMMY_API_URL, OPA_POLICY_URL, OPA_DATA_URL
 
 import json
 import os
@@ -233,7 +233,7 @@ Your tasks:
 - If there is are policy codes in the request, you must implement them to the generation code.
 - Keep in mind that the policy MUST be implemented to the existing APIs. Check the possibility before generating the policy.
   The existing API list is given by `list_apis` tool.
-- Refer to the current OPA policies using the `list_policies` tool.
+- Refer to the current OPA policies and OPA data, using the `list_policies` / `get_opa_data` tool.
 - Ensure strict Rego syntax correctness.
 - The generated policy must:
   - include the `if` keyword before rule bodies
@@ -600,6 +600,43 @@ def list_policies_tool(policy_id: str = None):
         result[policy['id']] = policy['raw']
 
     return json.dumps(result, indent=2, ensure_ascii=False)
+
+@mcp_server.tool("get_opa_data")
+def get_opa_data_tool():
+    """
+    Tool Name: get_opa_data
+    --------------------
+    Description:
+        Fetches data from the connected OPA server.
+
+        If a specific data_path is provided, the tool retrieves only that subset of data.
+        If data_path is omitted or None, the tool returns the full data tree.
+
+        The returned payload includes the requested data or error details.
+        This tool performs read-only operations and does not modify any OPA data.
+
+    Returns (JSON):
+        {
+            "data": dict
+                - The requested data from OPA.
+
+            "error": str (optional)
+                - Present only if a top-level OPA request failure occurred.
+        }
+    """
+    try:
+        res = requests.get(OPA_DATA_URL)
+        if res.status_code != 200:
+            return {
+                "error": f"OPA responded with {res.status_code}",
+                "detail": res.text
+            }
+
+        # OPA returns data under "result"
+        return {"data": res.json().get("result", {})}
+
+    except requests.RequestException as e:
+        return {"error": f"Failed to connect to OPA: {str(e)}"}
 
 
 @mcp_server.tool("update_policy")

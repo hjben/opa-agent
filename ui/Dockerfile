@@ -5,7 +5,7 @@ WORKDIR /app
 COPY ./ui/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
-COPY ../config ./config
+COPY ./ui .
+COPY ./config ./config
 
-CMD ["streamlit", "run", "/app/ui/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
