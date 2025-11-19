@@ -1,12 +1,11 @@
-from fastapi import FastAPI, Request, Depends, HTTPException
+from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-
+from config.url_config import OPA_ALLOW_URL
+import requests
 from mariadb.db_connection import db_cursor
 
-import requests
-
-app = FastAPI(title="Dummy API Server", description="Test APIs for policy validation")
+app = FastAPI(title="Dummy API Server", description="OPA 권한 테스트 서버")
 
 # ---------------------------
 # Models
@@ -26,19 +25,28 @@ class ReportRequest(BaseModel):
     report_type: str
     generated_by: str
 
-OPA_URL = "http://opa:8181/v1/data/httpapi/allow"
-
-def opa_authorize(request: Request):
+# ---------------------------
+# OPA 권한 체크
+# ---------------------------
+def opa_authorize(request: Request, resource_id: Optional[str] = None):
+    user_id = request.headers.get("user", "anonymous")
     payload = {
-        "input": {"method": request.method, "path": request.url.path, "user": request.headers.get("user", "anonymous")}
+        "user_id": user_id,
+        "method": request.method,
+        "path": request.url.path,
+        "resource_id": resource_id
     }
 
-    response = requests.post(OPA_URL, json=payload)
-    result = response.json()
+    print(payload)
 
+    response = requests.post(OPA_ALLOW_URL, json={"input": payload})
+    if response.status_code != 200:
+        raise HTTPException(status_code=500, detail="OPA server error")
+
+    result = response.json()
     if not result.get("result", False):
         raise HTTPException(status_code=403, detail="Access denied by OPA policy")
-    
+
 
 # ---------------------------
 # API Spec
@@ -50,16 +58,16 @@ def get_openapi_spec():
 # ---------------------------
 # Resource CRUD
 # ---------------------------
-@app.get("/api/resource", dependencies=[Depends(opa_authorize)])
-def get_all_resource():
-    """모든 리소스 조회"""
+@app.get("/api/resource")
+def get_all_resource(request: Request):
+    opa_authorize(request)
     with db_cursor(dictionary=True) as cursor:
         cursor.execute("SELECT * FROM dummy_resource")
         return cursor.fetchall()
 
-@app.get("/api/resource/{resource_id}", dependencies=[Depends(opa_authorize)])
-def get_resource(resource_id: str):
-    """특정 리소스 조회"""
+@app.get("/api/resource/{resource_id}")
+def get_resource(resource_id: str, request: Request):
+    opa_authorize(request, resource_id=resource_id)
     with db_cursor(dictionary=True) as cursor:
         cursor.execute("SELECT * FROM dummy_resource WHERE resource_id=%s", (resource_id,))
         resource = cursor.fetchone()
@@ -67,9 +75,9 @@ def get_resource(resource_id: str):
             raise HTTPException(status_code=404, detail="Resource not found")
         return resource
 
-@app.post("/api/resource/create", dependencies=[Depends(opa_authorize)])
-def create_resource(req: ResourceCreateRequest):
-    """리소스 생성"""
+@app.post("/api/resource/create")
+def create_resource(req: ResourceCreateRequest, request: Request):
+    opa_authorize(request, resource_id=req.resource_id)
     with db_cursor() as cursor:
         cursor.execute(
             "INSERT INTO dummy_resource (resource_id, owner, type, description) VALUES (%s, %s, %s, %s)",
@@ -77,9 +85,10 @@ def create_resource(req: ResourceCreateRequest):
         )
     return {"message": f"Resource '{req.resource_id}' created successfully", "data": req.dict()}
 
-@app.post("/api/resource/modify", dependencies=[Depends(opa_authorize)])
-def modify_resource(req: ResourceModifyRequest):
-    """리소스 수정"""
+@app.post("/api/resource/modify")
+def modify_resource(req: ResourceModifyRequest, request: Request):
+    opa_authorize(request, resource_id=req.resource_id)
+    print()
     with db_cursor() as cursor:
         cursor.execute(
             f"UPDATE dummy_resource SET {req.field}=%s WHERE resource_id=%s",
@@ -87,19 +96,19 @@ def modify_resource(req: ResourceModifyRequest):
         )
     return {"message": f"Resource '{req.resource_id}' modified successfully"}
 
-@app.delete("/api/resource/{resource_id}", dependencies=[Depends(opa_authorize)])
-def delete_resource(resource_id: str):
-    """리소스 삭제"""
+@app.delete("/api/resource/{resource_id}")
+def delete_resource(resource_id: str, request: Request):
+    opa_authorize(request, resource_id=resource_id)
     with db_cursor() as cursor:
         cursor.execute("DELETE FROM dummy_resource WHERE resource_id=%s", (resource_id,))
     return {"message": f"Resource '{resource_id}' deleted successfully"}
 
 # ---------------------------
-# Report
+# Report 생성
 # ---------------------------
-@app.post("/api/report/generate", dependencies=[Depends(opa_authorize)])
-def generate_report(req: ReportRequest):
-    """리포트 생성"""
+@app.post("/api/report/generate")
+def generate_report(req: ReportRequest, request: Request):
+    opa_authorize(request)
     file_path = f"/reports/{req.report_type}.pdf"
     with db_cursor() as cursor:
         cursor.execute(

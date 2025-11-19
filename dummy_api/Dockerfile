@@ -7,7 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY dummy_api/main.py .
 COPY ../mariadb ./mariadb
+COPY ../config ./config
 
 EXPOSE 8085
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8085"]

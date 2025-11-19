@@ -1,6 +1,5 @@
 from mcp.server.fastmcp import FastMCP
-from service.mariadb import get_user_by_id, get_all_users
-# from service.qdrant import QdrantService
+from config.url_config import DUMMY_API_URL, OPA_POLICY_URL
 
 import json
 import os
@@ -8,15 +7,8 @@ import requests
 import tempfile
 import subprocess
 
-# Qdrant 연결
-# qdrant = QdrantService(url="http://qdrant:6333")
-
-DUMMY_API_URL = "http://localhost:8085"
-OPA_URL = "http://localhost:8181/v1/policies"
-
 # MCP Server 생성
 mcp_server = FastMCP(name="opa_tools", host="0.0.0.0", port="8001", debug=True)
-
 
 # -------------------------------
 # Prompts
@@ -77,13 +69,13 @@ Example:
 - Assign each intent to EXACTLY ONE category:
     A. Policy Explanation  
     B. New Policy Generation  
-    C. Policy Update / Modify / Deletion
+    C. Policy Add / Update / Deletion
     D. Non-OPA / unclear → mark as "unknown"
 - You MUST NOT guess meaning beyond the text. If insufficient → mark missing fields as null.
 - Include representative examples in classification to improve accuracy.
     * Category A → explanation of current policies
-    * Category B → create new policy
-    * Category C → modify/update/delete existing policy
+    * Category B → create new policy or modify a policy code
+    * Category C → apply some policy to OPA service
     * unknown → clarification needed
 
 Example output:
@@ -210,9 +202,9 @@ Avoid:
 Output Rules:
 - Provide a JSON with exactly two keys: "user_query" and "content". add all your results in string type.
 - The "content" value must be a **Markdown-formatted string**, including:
-    - ## Summary: concise explanation of the policies
-    - ## Policy Code: fenced code block (```rego```) for policy code
-    - ## Key Rules: explanation of rules, decision logic, and examples
+    - ## Summary: <concise explanation of the policies>
+    - ## Policy Code: <fenced code block (```rego```) for policy code>
+    - ## Key Rules: <explanation of rules, decision logic, and examples>
 - Do NOT add other JSON keys or code fences outside of the Markdown in "content".
 - If the user query is written in Korean, also answer in Korean.
 - Your responses must be precise, structured, and helpful.
@@ -238,6 +230,7 @@ Your tasks:
 1. Generate Rego Policy Code
 ------------------------------------------------------------
 - Generate a valid OPA Rego policy that satisfies the user request.
+- If there is are policy codes in the request, you must implement them to the generation code.
 - Keep in mind that the policy MUST be implemented to the existing APIs. Check the possibility before generating the policy.
   The existing API list is given by `list_apis` tool.
 - Refer to the current OPA policies using the `list_policies` tool.
@@ -322,9 +315,6 @@ Requirements:
 
 Example structure:
 
-## Policy Code
-# Policy Summary
-
 ## Summary
 This policy controls resource access based on user roles and request methods.  
 Policy syntax validation passed successfully, the test code syntax also passed,  
@@ -391,10 +381,10 @@ You MUST:
 Output Rules:
 - Return a JSON with exactly two keys: "user_query" and "content".
 - The "content" value must be **Markdown-formatted** and include:
-    - ## User request: what the LLM understood
-    - ## Modification Plan: steps or rules being changed
-    - ## Target Policy Code: fenced code block (```rego```) with updated code
-    - ## Explanation: short reasoning in same language as user
+    - ## User request: <what the LLM understood>
+    - ## Modification Plan: <steps or rules being changed>
+    - ## Target Policy Code: <fenced code block (```rego```) with updated code>
+    - ## Explanation: <short reasoning in same language as user>
 - No extra code fences outside the Markdown.
 - Preserve formatting, indentation, and newlines.
 """
@@ -547,38 +537,6 @@ async def opa_test(policy_code, test_code):
             os.remove(test_path)
 
 
-# -------------------------------
-# Tool: User 정보 추출
-# -------------------------------
-@mcp_server.tool("user")
-async def get_user_tool(data: dict):
-    """
-    Tool Name: user
-    --------------------
-    Description:
-        Retrieves information for a single user based on the provided employee ID (emp_id),
-        or returns all users if emp_id is not provided.
-    
-        This tool is useful for fetching user details from the database in a standardized format.
-    
-    Args:
-        data: dict
-            - emp_id: str, optional
-                Employee ID of the user to retrieve. If not provided, all users are returned.
-    
-    Returns (JSON):
-        {
-            "user": dict
-                - Contains user information when emp_id is provided.
-            "users": list[dict]
-                - List of all users when emp_id is not provided.
-        }
-    """
-    emp_id = data.get("emp_id")
-    if emp_id:
-        return {"user": get_user_by_id(emp_id)}
-    return {"users": get_all_users()}
-
 @mcp_server.tool("list_policies")
 def list_policies_tool(policy_id: str = None):
     """
@@ -621,9 +579,9 @@ def list_policies_tool(policy_id: str = None):
         }
     """
     if policy_id is not None:
-        res = requests.get(f"{OPA_URL}/{policy_id}")
+        res = requests.get(f"{OPA_POLICY_URL}/{policy_id}")
     else:
-        res = requests.get(OPA_URL)
+        res = requests.get(OPA_POLICY_URL)
 
     if res.status_code != 200:
         return {
@@ -690,7 +648,7 @@ def update_policy(policy_id: str, policy_str: str):
         }
     """
     headers = {"Content-Type": "text/plain"}
-    res = requests.put(f"{OPA_URL}/{policy_id}", data=policy_str.encode("utf-8"), headers=headers)
+    res = requests.put(f"{OPA_POLICY_URL}/{policy_id}", data=policy_str.encode("utf-8"), headers=headers)
 
     if res.status_code not in (200, 204):
         return {
@@ -742,7 +700,7 @@ def delete_policy(policy_id: str):
             "policy_id": "example_policy"
         }
     """
-    res = requests.delete(f"{OPA_URL}/{policy_id}")
+    res = requests.delete(f"{OPA_POLICY_URL}/{policy_id}")
 
     if res.status_code not in (200, 204):
         return {

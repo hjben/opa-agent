@@ -1,5 +1,6 @@
 import os
 
+
 MARIADB_CONFIG = {
     "host": os.getenv("MARIADB_HOST", "mariadb"),
     "port": int(os.getenv("MARIADB_PORT", 3306)),

@@ -1,12 +1,15 @@
 import ast
 import json
-import re
+import requests
 
 from typing import Optional, Dict
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from langchain_openai import AzureChatOpenAI
 from langgraph.prebuilt import create_react_agent
 from langchain_mcp_adapters.client import MultiServerMCPClient
+
+from mariadb.db_connection import db_cursor
+from config.url_config import OPA_DATA_URL_USERS, OPA_DATA_URL_RESOURCES
 
 app = FastAPI(title="MCP OPA Client")
 
@@ -200,7 +203,7 @@ class MCPClientManager:
 # FastAPI Startup
 # ===============================
 client_manager = MCPClientManager(
-    mcp_url="http://localhost:8001/mcp/",
+    mcp_url="http://mcp-server:8001/mcp/",
     azure_endpoint="https://skcc-atl-master-openai-01.openai.azure.com/",
     api_key="FpWkoIu3ZsP9VTrYqmxF8wEUzmAAXrqkTh28HxyX0JdyniQzsJRgJQQJ99BEACYeBjFXJ3w3AAABACOGGWOw",
     azure_deployment="gpt-4o"
@@ -213,31 +216,41 @@ async def startup_event():
 # ===============================
 # FastAPI Endpoint
 # ===============================
-@app.post("/opa_request")
-async def opa_request(request: dict):
+@app.post("/chat")
+async def opa_chat(request: dict = Body(...)):
     """
     Analyze user request and choose the proper API
     """
-    user_query = request.get("query")
+    messages = request.get("messages")
+    if not messages or len(messages) == 0:
+        raise HTTPException(status_code=400, detail="Missing 'messages' field.")
+
+    # 마지막 user 메시지 추출
+    user_query = None
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            user_query = msg.get("content")
+            break
 
     if not user_query:
-        raise HTTPException(status_code=400, detail="Missing 'request' field.")
+        raise HTTPException(status_code=400, detail="No user message found in 'messages'.")
 
     try:
-        clsf_result = await client_manager.llm_call(client_manager.prompts["opa_orchestrator"].format(user_query=user_query))
+        clsf_result = await client_manager.llm_call(
+            client_manager.prompts["opa_orchestrator"].format(user_query=user_query)
+        )
         clsf_json = client_manager.parse_result(clsf_result)
-
         if not clsf_json:
             clsf_json = client_manager.extract_last_json(clsf_result)
         print(clsf_json)
 
         final_res = ""
         policy_code = ""
-        for task in clsf_json["tasks"]:
-            if task["target_prompt"] is not None:
+        for task in clsf_json.get("tasks", []):
+            if task.get("target_prompt") is not None:
                 target_prompt = client_manager.prompts[task["target_prompt"].replace("_prompt", "")]
                 
-                if len(policy_code)!=0:
+                if len(policy_code) != 0:
                     task["params"]["policy_code"] = policy_code
 
                 llm_text = await client_manager.llm_call(target_prompt.format(**task["params"]))
@@ -248,23 +261,61 @@ async def opa_request(request: dict):
                     res_json = client_manager.extract_last_json(llm_text)
                 print(res_json)
 
-                if task["category"] == "B": # 생성된 코드가 있는 경우
-                    policy_code = res_json["policy_code"]
+                if task.get("category") == "B":  # 생성된 코드가 있는 경우
+                    policy_code = res_json.get("policy_code", "")
                 else:
                     policy_code = ""
 
-                final_res += res_json["content"] + '\n'
+                final_res += res_json.get("content", "") + '\n'
         
-        if len(final_res)==0:
-            final_res = clsf_json["notes"]
+        if len(final_res) == 0:
+            final_res = clsf_json.get("notes", "No content generated.")
 
         return {
             "status": "success",
             "content": final_res
         }
+
     except Exception as e:
         print(e)
         return {
             "status": "fail",
             "content": str(e)
         }
+
+
+@app.get("/sync")
+def sync_all_to_opa():
+    try:
+        # 1. 사용자 정보 동기화
+        users_data = {}
+        with db_cursor(dictionary=True) as cursor:
+            cursor.execute("SELECT * FROM user")
+            for u in cursor.fetchall():
+                users_data[u["emp_id"]] = {
+                    "name": u["name"],
+                    "dept": u["dept"],
+                    "is_admin": bool(u["is_admin"])
+                }
+        resp_users = requests.put(OPA_DATA_URL_USERS, json=users_data)
+        if resp_users.status_code != 204:
+            raise HTTPException(status_code=500, detail=f"Failed to update users in OPA: {resp_users.text}")
+
+        # 2. 리소스 소유자 동기화
+        resources_data = {}
+        with db_cursor(dictionary=True) as cursor:
+            cursor.execute("SELECT resource_id, owner FROM dummy_resource")
+            for r in cursor.fetchall():
+                resources_data[r["resource_id"]] = r["owner"]
+        resp_resources = requests.put(OPA_DATA_URL_RESOURCES, json=resources_data)
+        if resp_resources.status_code != 204:
+            raise HTTPException(status_code=500, detail=f"Failed to update resources in OPA: {resp_resources.text}")
+
+        return {
+            "message": "Users and resource owners synced to OPA successfully",
+            "user_count": len(users_data),
+            "resource_count": len(resources_data)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sync failed: {e}")

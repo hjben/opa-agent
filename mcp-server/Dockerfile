@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ./mcp-server /app
 COPY ../data/opa/ /data/opa/
+COPY ../config ./config
 
 RUN chmod +x /app/setup_opa.sh
 

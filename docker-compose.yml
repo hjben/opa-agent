@@ -3,14 +3,15 @@ version: "3.9"
 services:
   mcp-client:
     build:
-      context: ./mcp-client
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: mcp-client/Dockerfile
       platforms:
         - linux/amd64
     container_name: mcp-client
     ports:
       - "8000:8000"
     depends_on:
+      - mariadb
       - mcp-server
     networks:
       - mcp-network
@@ -34,8 +35,8 @@ services:
 
   ui:
     build:
-      context: ./ui
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./ui/Dockerfile
       platforms:
         - linux/amd64
     container_name: ui
@@ -61,9 +62,9 @@ services:
     image: openpolicyagent/opa:latest-debug
     container_name: opa
     platform: linux/amd64
-    command: ["run", "--server", "--log-level", "debug", "--bundle", "/app/opa/bundle.tar.gz", "--addr", "0.0.0.0:8181"]
+    command: ["run", "--server", "--log-level", "debug", "/app/opa/policy", "--addr", "0.0.0.0:8181"]
     volumes:
-      - ./opa:/app/opa
+      - ./opa/policy:/app/opa/policy
     ports:
       - "8181:8181"
     networks:
@@ -83,7 +84,6 @@ services:
       - ./mariadb/init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - mcp-network
-
   dummy-api:
     build:
       context: .

@@ -1,87 +1,119 @@
 import streamlit as st
 import requests
-from markdown import markdown
+import threading
+import queue
 
-# -------------------------------
-# 초기 세션 상태 설정
-# -------------------------------
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+from config.url_config import MCP_CLIENT_URL
+from streamlit_autorefresh import st_autorefresh
 
-# -------------------------------
+# -------------------------------------------------
 # 페이지 설정
-# -------------------------------
-st.set_page_config(
-    page_title="OPA Chat",
-    page_icon="🤖",
-    layout="wide"
-)
+# -------------------------------------------------
+st.set_page_config(page_title="OPA Chat", layout="centered")
 
-st.title("OPA Policy Agent Chat")
+# -------------------------------------------------
+# 세션 상태 초기화
+# -------------------------------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-# -------------------------------
-# 채팅 영역
-# -------------------------------
-chat_container = st.container()
-with chat_container:
-    for msg in st.session_state.chat_history:
-        role = msg["role"]
-        content = msg["content"]
+if "loading" not in st.session_state:
+    st.session_state.loading = False
 
-        # 왼쪽/오른쪽 구분
-        if role == "user":
-            align = "right"
-            bg_color = "#DCF8C6"
-        else:
-            align = "left"
-            bg_color = "#F1F0F0"
+if "response_queue" not in st.session_state:
+    st.session_state.response_queue = queue.Queue()
 
-        st.markdown(
-            f"""
-            <div style='
-                background-color: {bg_color};
-                padding: 10px 15px;
-                border-radius: 10px;
-                margin: 5px;
-                text-align: {align};
-                max-width: 80%;
-                display: inline-block;
-                word-wrap: break-word;
-            '>{content}</div>
-            """,
-            unsafe_allow_html=True
-        )
+if "thread_running" not in st.session_state:
+    st.session_state.thread_running = False
 
-# -------------------------------
-# 입력 영역
-# -------------------------------
-with st.form(key="chat_form", clear_on_submit=True):
-    user_input = st.text_area("Your message", value="", key="input", height=80)
-    submit_button = st.form_submit_button(label="Send")
-
-if submit_button and user_input.strip():
-    # 유저 메시지 추가
-    st.session_state.chat_history.append({"role": "user", "content": user_input})
-
-    # -------------------------------
-    # MCP 서버 호출
-    # -------------------------------
+# -------------------------------------------------
+# 백엔드 비동기 호출 스레드 (대화 컨텍스트 포함)
+# -------------------------------------------------
+def call_backend_with_context(user_text: str, messages: list, q: queue.Queue):
+    """백엔드를 비동기로 호출하여 응답 내용을 Queue에 넣음"""
     try:
-        response = requests.post(
-            "http://localhost:8000/opa_request",
-            json={"query": user_input},
+        # 스레드에서는 st.session_state 접근하지 않고, messages 복사본 사용
+        payload = {
+            "messages": messages + [{"role": "user", "content": user_text}]
+        }
+
+        res = requests.post(
+            f"{MCP_CLIENT_URL}/chat",  # 백엔드 엔드포인트
+            json=payload,
             timeout=60
         )
-        if response.status_code == 200:
-            data = response.json()
-            content = data.get("content", "")
+        if res.status_code == 200:
+            data = res.json()
+            q.put(data.get("content", "빈 응답"))
         else:
-            content = f"Error: {response.status_code} - {response.text}"
+            q.put(f"❌ 서버 오류: {res.status_code}")
     except Exception as e:
-        content = f"Request failed: {str(e)}"
+        q.put(f"❌ 예외 발생: {str(e)}")
+    finally:
+        # UI 스레드에서 상태 변경
+        q.put("__THREAD_DONE__")
 
-    # 봇 응답 추가
-    st.session_state.chat_history.append({"role": "bot", "content": content})
+# -------------------------------------------------
+# 메시지 렌더링 (Markdown 코드블록 완전 지원)
+# -------------------------------------------------
+def render_messages():
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    # 스크롤 맨 아래로 이동
-    st.experimental_rerun()
+# -------------------------------------------------
+# autorefresh: 1초마다 새로고침
+# -------------------------------------------------
+st_autorefresh(interval=1000, key="refresh_tick")
+
+# -------------------------------------------------
+# UI 렌더링
+# -------------------------------------------------
+st.title("🔵 OPA Policy Chat")
+render_messages()
+
+# 로딩 표시
+if st.session_state.loading:
+    with st.chat_message("assistant"):
+        st.write("⌛ 처리 중...")
+
+# -------------------------------------------------
+# 사용자 입력 → 백엔드 요청 처리
+# -------------------------------------------------
+user_input = st.chat_input("메시지를 입력하세요")
+
+if user_input and not st.session_state.loading:
+    # 사용자 메시지 저장
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.session_state.loading = True
+
+    # messages 복사본 전달
+    messages_copy = st.session_state.messages.copy()
+
+    # 비동기 백엔드 호출
+    t = threading.Thread(
+        target=call_backend_with_context,
+        args=(user_input, messages_copy, st.session_state.response_queue),
+        daemon=True
+    )
+    st.session_state.thread_running = True
+    t.start()
+    st.rerun()
+
+# -------------------------------------------------
+# 백엔드 응답 수신: Queue 확인
+# -------------------------------------------------
+try:
+    while True:
+        response = st.session_state.response_queue.get_nowait()
+        if response == "__THREAD_DONE__":
+            st.session_state.thread_running = False
+        else:
+            # assistant 메시지 추가
+            st.session_state.messages.append(
+                {"role": "assistant", "content": response}
+            )
+            st.session_state.loading = False
+            st.rerun()
+except queue.Empty:
+    pass

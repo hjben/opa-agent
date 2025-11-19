@@ -2,19 +2,28 @@ package httpapi
 
 default allow = false
 
-# 관리자 전체 허용
+# Admin은 모든 API 허용
 allow if {
-    input.user == "admin"
+    user := data.users[input.user_id]
+    user.role == "Admin"
 }
 
-# 조회는 누구나 가능
+# GET 요청은 모든 유저 허용
 allow if {
     input.method == "GET"
 }
 
-# 생성/수정/삭제는 owner만 허용 (simplified example)
+# 리소스 소유자만 수정 허용
+allow if {
+    input.input.method == "POST"
+    input.input.path == "/api/resource/modify"
+    resource_owner := data.resource_owners[input.input.resource_id]
+    input.input.user_id == resource_owner
+}
+
+# platform 부서에 report 생성 권한 부여
 allow if {
     input.method == "POST"
-    input.path == "/api/resource/create"
-    input.user == "owner"
+    input.path == "/api/resource/modify"
+    input.user.department == "platform"
 }
