@@ -176,7 +176,7 @@ class MCPClientManager:
 client_manager = MCPClientManager(
     mcp_url="http://mcp-server:8001/mcp/",
     azure_endpoint="https://skcc-atl-master-openai-01.openai.azure.com/",
-    api_key="FpWkoIu3ZsP9VTrYqmxF8wEUzmAAXrqkTh28HxyX0JdyniQzsJRgJQQJ99BEACYeBjFXJ3w3AAABACOGGWOw",
+    api_key="",
     azure_deployment="gpt-4o"
 )
 
