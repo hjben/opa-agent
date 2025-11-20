@@ -34,62 +34,43 @@ class MCPClientManager:
 
     @staticmethod
     def parse_result(text: str):
-        """
-        Safely extract content from a single ```json or ```markdown block.
-        Handles cases where ``` may appear inside the block.
-        The trailing ``` is removed.
-
-        Args:
-            text (str): Input string containing either a JSON or Markdown code block.
-
-        Returns:
-            dict:
-                - If ```json: parsed JSON object
-                - If ```markdown: {"content": <text>}
-            None if no matching block found.
-        """
-        # 우선 블록 시작 위치 찾기
         json_start = text.find("```json")
         md_start = text.find("```markdown")
 
         if json_start != -1:
-            # 마지막 ``` 위치 찾기
             end_pos = text.rfind("```")
             if end_pos <= json_start:
+                print("parse_result: invalid json block position")
                 return None
             json_text = text[json_start + len("```json"):end_pos].strip()
             try:
                 return json.loads(json_text)
             except json.JSONDecodeError as e:
-                print(e)
+                print("parse_result: JSON decode error:", e)
                 return None
 
         if md_start != -1:
             end_pos = text.rfind("```")
             if end_pos <= md_start:
+                print("parse_result: invalid markdown block position")
                 return None
             md_text = text[md_start + len("```markdown"):end_pos].strip()
             return {"content": md_text}
 
+        print("parse_result: no json/markdown block found")
         return None
 
     @staticmethod
     def extract_last_json(text: str) -> Optional[Dict]:
-        """
-        Scan `text`, find top-level {...} JSON blocks robustly (ignoring braces inside strings),
-        parse them and return the last successfully parsed JSON-like object (as dict).
-        If none parse, return None.
-        """
         blocks = []
         brace_level = 0
         start_idx = None
         in_string = False
-        string_char = None   # either '"' or "'"
+        string_char = None
         escape = False
 
         for i, ch in enumerate(text):
-            # Handle string toggling and escapes
-            if ch == '"' or ch == "'":
+            if ch in ['"', "'"]:
                 if not escape:
                     if not in_string:
                         in_string = True
@@ -97,23 +78,14 @@ class MCPClientManager:
                     elif string_char == ch:
                         in_string = False
                         string_char = None
-                # else: quote escaped -> ignore
                 escape = False
-                # If inside string, chars don't affect brace_level
-                if brace_level > 0:
-                    continue
-                else:
-                    continue
+                continue
             elif ch == "\\":
-                # toggle escape for next char
                 escape = not escape
-                # continue loop (do not reset escape here, next iteration handles)
                 continue
             else:
-                # reset escape if previous char was backslash (and current not another backslash)
                 escape = False
 
-            # If not inside string, track braces
             if not in_string:
                 if ch == "{":
                     if brace_level == 0:
@@ -126,51 +98,35 @@ class MCPClientManager:
                             block = text[start_idx:i+1]
                             blocks.append(block)
                             start_idx = None
-                    # else: unmatched closing brace — ignore
-            # else: inside string, ignore braces
 
         if not blocks:
-            print(text)
+            print("extract_last_json: no blocks found")
             return None
 
-        # Try to parse blocks from last to first (so we can return the last valid)
         for raw in reversed(blocks):
             s = raw.strip()
-            # quick cleanup: sometimes LLM injects weird backticks around blocks; remove leading/trailing backticks
-            if s.startswith("```") and s.endswith("```"):
-                # remove fencing, keep inner
-                inner = s.strip("`")
-                s = inner.strip()
-
-            # Attempt JSON parsing
             try:
-                parsed = json.loads(s)
-                return parsed
-            except json.JSONDecodeError:
-                # Try python literal eval (accepts single quotes etc.)
-                try:
-                    parsed = ast.literal_eval(s)
-                    # ensure it's a dict-like result
-                    if isinstance(parsed, dict):
-                        return parsed
-                except Exception:
-                    pass
-
-                # Last resort: try heuristic fixes (replace single quotes -> double quotes, True/False -> true/false)
-                try:
-                    heur = s.replace("'", '"').replace("True", "true").replace("False", "false").replace("None", "null")
-                    parsed = json.loads(heur)
+                return json.loads(s)
+            except Exception:
+                pass
+            try:
+                parsed = ast.literal_eval(s)
+                if isinstance(parsed, dict):
                     return parsed
-                except Exception:
-                    # parsing failed for this block, continue to previous block
-                    continue
+            except Exception:
+                pass
+            try:
+                heur = s.replace("'", '"').replace("True", "true").replace("False", "false").replace("None", "null")
+                return json.loads(heur)
+            except Exception:
+                continue
 
-        # No block parsed successfully
-        print(text)
+        print("extract_last_json: failed to parse JSON")
         return None
-        
+
     async def initialize(self):
-        """Initialize MCP client, load tools, prompts, and LLM agent."""
+        print("Initializing MCP Client...")
+
         model = AzureChatOpenAI(
             azure_endpoint=self.azure_endpoint,
             api_key=self.api_key,
@@ -185,25 +141,38 @@ class MCPClientManager:
             }
         })
 
+        print("Loading MCP tools...")
         tools = await self.mcp_client.get_tools()
+
+        print("Loading prompts...")
         for prompt in self.prompts_list:
             self.prompts[prompt] = (await self.mcp_client.get_prompt("opa_tools", f"{prompt}_prompt"))[0].content
+            print(f"Loaded prompt: {prompt}")
 
+        print("Creating agent...")
         self.agent = create_react_agent(model, tools, prompt=self.prompts["base"])
-        print("✅ MCP Client initialized, prompts loaded")
+        print("MCP Client initialized!")
 
     async def llm_call(self, prompt: str):
+        print("\n================ LLM CALL START ================")
+        print("Prompt sent to LLM:\n", prompt[:500], "...\n")
+
         result = ""
+
         async for chunk_msg, _ in self.agent.astream({"messages": prompt}, stream_mode="messages"):
+            if hasattr(chunk_msg, "tool_calls") and chunk_msg.tool_calls:
+                for call in chunk_msg.tool_calls:
+                    print(f"LLM is calling Tool: {call.get('name')} with args {call.get('args')}")
+
             if hasattr(chunk_msg, "content") and isinstance(chunk_msg.content, str):
                 result += chunk_msg.content
 
+        print("LLM response collected (first 400 chars):")
+        print(result[:400], "...\n")
+        print("================ LLM CALL END ==================\n")
+
         return result
-    
-    
-# ===============================
-# FastAPI Startup
-# ===============================
+
 client_manager = MCPClientManager(
     mcp_url="http://mcp-server:8001/mcp/",
     azure_endpoint="https://skcc-atl-master-openai-01.openai.azure.com/",
@@ -215,70 +184,74 @@ client_manager = MCPClientManager(
 async def startup_event():
     await client_manager.initialize()
 
-# ===============================
-# FastAPI Endpoint
-# ===============================
 @app.post("/chat")
 async def opa_chat(request: dict = Body(...)):
-    """
-    Analyze user request and choose the proper API
-    """
+    print("\n============== NEW REQUEST ==============")
+    print("Incoming request:", request)
+
     messages = request.get("messages")
     if not messages or len(messages) == 0:
         raise HTTPException(status_code=400, detail="Missing 'messages' field.")
 
     recent_messages = messages[-context_window:]
 
-    # LLM에 보낼 context 문자열 생성
-    # 각 메시지에 role prefix를 붙여서 구분
     user_query = ""
     for msg in recent_messages:
         role = msg.get("role")
         content = msg.get("content", "")
         if content:
-            if role == "user":
-                user_query += f"User: {content}\n"
-            elif role == "assistant":
-                user_query += f"Assistant: {content}\n"
+            user_query += f"{role.capitalize()}: {content}\n"
 
-    if not user_query.strip():
-        raise HTTPException(status_code=400, detail="No usable messages found in 'messages'.")
+    print("Constructed user_query:\n", user_query)
 
     try:
+        print("Calling Orchestrator...")
         clsf_result = await client_manager.llm_call(
             client_manager.prompts["opa_orchestrator"].format(user_query=user_query)
         )
+        print("Orchestrator raw output:\n", clsf_result)
+
         clsf_json = client_manager.parse_result(clsf_result)
         if not clsf_json:
+            print("parse_result failed, trying extract_last_json...")
             clsf_json = client_manager.extract_last_json(clsf_result)
-        print(clsf_json)
+
+        print("Parsed orchestrator JSON:", clsf_json)
 
         final_res = ""
         policy_code = ""
+
         for task in clsf_json.get("tasks", []):
+            print(f"Executing Task: {task}")
+
             if task.get("target_prompt") is not None:
                 target_prompt = client_manager.prompts[task["target_prompt"].replace("_prompt", "")]
-                
+
                 if len(policy_code) != 0:
                     task["params"]["policy_code"] = policy_code
 
+                print(f"Sending task prompt: {task['target_prompt']}")
                 llm_text = await client_manager.llm_call(target_prompt.format(**task["params"]))
-                print(llm_text)
+                print("Task output:\n", llm_text)
 
                 res_json = client_manager.parse_result(llm_text)
                 if not res_json:
+                    print("parse_result failed for task, trying extract_last_json...")
                     res_json = client_manager.extract_last_json(llm_text)
-                print(res_json)
 
-                if task.get("category") == "B":  # 생성된 코드가 있는 경우
+                print("Parsed task JSON:", res_json)
+
+                if task.get("category") == "B":
                     policy_code = res_json.get("policy_code", "")
                 else:
                     policy_code = ""
 
                 final_res += res_json.get("content", "") + '\n'
-        
+
         if len(final_res) == 0:
             final_res = clsf_json.get("notes", "No content generated.")
+
+        print("Final response sent to client:\n", final_res)
 
         return {
             "status": "success",
@@ -286,11 +259,12 @@ async def opa_chat(request: dict = Body(...)):
         }
 
     except Exception as e:
-        print(e)
+        print("Exception occurred:", e)
         return {
             "status": "fail",
             "content": str(e)
         }
+
 
 
 @app.get("/sync")
