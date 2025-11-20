@@ -29,7 +29,6 @@ services:
     depends_on:
       - mariadb
       - opa
-      - qdrant
     networks:
       - mcp-network
 
@@ -47,24 +46,11 @@ services:
     networks:
       - mcp-network
 
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: qdrant
-    platform: linux/amd64
-    ports:
-      - "6333:6333"
-    volumes:
-      - ./data/qdrant:/qdrant/storage
-    networks:
-      - mcp-network
-
   opa:
     image: openpolicyagent/opa:latest-debug
     container_name: opa
     platform: linux/amd64
-    command: ["run", "--server", "--log-level", "debug", "/app/opa/policy", "--addr", "0.0.0.0:8181"]
-    volumes:
-      - ./opa/policy:/app/opa/policy
+    command: ["run", "--server", "--log-level", "debug", "--addr", "0.0.0.0:8181"]
     ports:
       - "8181:8181"
     networks:

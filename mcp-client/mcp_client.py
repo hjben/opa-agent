@@ -1,6 +1,7 @@
 import ast
 import json
 import requests
+import os
 
 from typing import Optional, Dict
 from fastapi import FastAPI, HTTPException, Body
@@ -9,7 +10,8 @@ from langgraph.prebuilt import create_react_agent
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from mariadb.db_connection import db_cursor
-from config.url_config import OPA_DATA_URL
+from config.url_config import OPA_DATA_URL, OPA_POLICY_URL
+from config.base_config import context_window
 
 app = FastAPI(title="MCP OPA Client")
 
@@ -225,15 +227,22 @@ async def opa_chat(request: dict = Body(...)):
     if not messages or len(messages) == 0:
         raise HTTPException(status_code=400, detail="Missing 'messages' field.")
 
-    # 마지막 user 메시지 추출
-    user_query = None
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            user_query = msg.get("content")
-            break
+    recent_messages = messages[-context_window:]
 
-    if not user_query:
-        raise HTTPException(status_code=400, detail="No user message found in 'messages'.")
+    # LLM에 보낼 context 문자열 생성
+    # 각 메시지에 role prefix를 붙여서 구분
+    user_query = ""
+    for msg in recent_messages:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if content:
+            if role == "user":
+                user_query += f"User: {content}\n"
+            elif role == "assistant":
+                user_query += f"Assistant: {content}\n"
+
+    if not user_query.strip():
+        raise HTTPException(status_code=400, detail="No usable messages found in 'messages'.")
 
     try:
         clsf_result = await client_manager.llm_call(
@@ -311,8 +320,27 @@ def sync_all_to_opa():
         if resp_resources.status_code != 204:
             raise HTTPException(status_code=500, detail=f"Failed to update resources in OPA: {resp_resources.text}")
 
+        # 3. rego 정책 파일 OPA에 업로드
+        policy_dir = "/app/policy"
+        for filename in os.listdir(policy_dir):
+            if filename.endswith(".rego"):
+                with open(os.path.join(policy_dir, filename), "r") as f:
+                    rego_code = f.read()
+
+                resp_policy = requests.put(
+                    f'{OPA_POLICY_URL}/{filename.replace(".rego", "")}',
+                    data=rego_code,
+                    headers={"Content-Type": "text/plain"}
+                )
+
+                if resp_policy.status_code not in (200, 204):
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to upload policy {filename}: {resp_policy.text}"
+                    )
+
         return {
-            "message": "Users and resource owners synced to OPA successfully",
+            "message": "Users, resource owners, and policies synced to OPA successfully",
             "user_count": len(users_data),
             "resource_count": len(resources_data)
         }

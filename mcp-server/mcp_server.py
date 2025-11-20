@@ -109,6 +109,7 @@ Example output:
 
 - "unknown" → return a clarification request
 
+The parameter 'policy_id' is apath of the policy file. (e.g. app/opa/policy/authz.rego), you may infer the parameter from request.
 You MUST prepare the `target_prompt` and `params` for EACH intent.
 Example output:
 [
@@ -202,7 +203,7 @@ Avoid:
 Output Rules:
 - Provide a JSON with exactly two keys: "user_query" and "content". add all your results in string type.
 - The "content" value must be a **Markdown-formatted string**, including:
-    - ## Summary: <concise explanation of the policies>
+    - ## Summary: <concise explanation of the policies with ``` block and normal plain text>
     - ## Policy Code: <fenced code block (```rego```) for policy code>
     - ## Key Rules: <explanation of rules, decision logic, and examples>
 - Do NOT add other JSON keys or code fences outside of the Markdown in "content".
@@ -372,6 +373,8 @@ You MUST:
 4. When modifying a policy:
    - Identify the affected package, rule, and logical conditions.
    - Generate the updated Rego block exactly as it should appear.
+   - If the user request is merging a new policy, re-generate proper policy code to apply to the system.
+   - If the attempt is failed, retry it with revised code.
 5. When deleting a policy or rule:
    - Identify the correct policy_id or rule name to remove.
    - Ensure no partial or inconsistent deletions occur.
@@ -591,15 +594,43 @@ def list_policies_tool(policy_id: str = None):
 
     data = res.json()
 
-    # policies 필드가 없는 경우 방어 처리
+
     policies = data.get("result", data)
 
-    # 정책 상세를 모두 가져오기
     result = {}
-    for policy in policies:
-        result[policy['id']] = policy['raw']
+    if isinstance(policies, dict):
+        if "id" in policies:
+            result[policies["id"]] = policies.get("raw", "")
+            return json.dumps(result, indent=2, ensure_ascii=False)
 
-    return json.dumps(result, indent=2, ensure_ascii=False)
+        # dict인데 list 형태가 아니면 오류
+        return {
+            "error": "Unexpected structure for policy data",
+            "data": policies
+        }
+
+    if isinstance(policies, list):
+        for p in policies:
+            if not isinstance(p, dict):
+                return {
+                    "error": "Policy entry is not a dict",
+                    "entry": p
+                }
+
+            if "id" not in p:
+                return {
+                    "error": "Policy entry missing 'id' field",
+                    "entry": p
+                }
+
+            result[p["id"]] = p.get("raw", "")
+        
+        return json.dumps(result, indent=2, ensure_ascii=False)
+
+    return {
+        "error": "OPA returned unexpected structure",
+        "data": policies
+    }
 
 @mcp_server.tool("get_opa_data")
 def get_opa_data_tool():

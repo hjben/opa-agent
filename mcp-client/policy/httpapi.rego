@@ -10,11 +10,6 @@ allow if {
     user.is_admin
 }
 
-# GET 요청은 모든 유저 허용
-allow if {
-    input.method == "GET"
-}
-
 # 리소스 소유자만 수정 허용
 allow if {
     input.method == "POST"
